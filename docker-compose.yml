@@ -1,0 +1,27 @@
+# 企业知识库 RAG 系统 —— 一键拉起 Ollama（Qwen3-14B + bge-m3）
+# 用法：
+#   docker compose up -d ollama
+#   docker compose exec ollama ollama pull qwen3:14b
+#   docker compose exec ollama ollama pull bge-m3
+#   cp .env.example .env && uvicorn backend.app.main:app --port 8000
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: kb-ollama
+    ports:
+      - '11434:11434'
+    volumes:
+      - ollama_models:/root/.ollama
+    restart: unless-stopped
+    # 有 NVIDIA GPU 时取消注释以启用加速：
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+volumes:
+  ollama_models:
