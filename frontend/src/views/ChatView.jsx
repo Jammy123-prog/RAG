@@ -2,6 +2,45 @@ import { useEffect, useRef, useState } from 'react'
 import { streamChat } from '../lib/api'
 import { IconSend, IconSpark, IconQuote } from '../components/icons.jsx'
 
+function Lightbox({ url, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => e.key === 'Escape' && onClose()
+    window.addEventListener('keydown', onKey)
+    document.body.style.overflow = 'hidden'
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      document.body.style.overflow = ''
+    }
+  }, [onClose])
+
+  return (
+    <div
+      className="lightbox-backdrop fixed inset-0 z-50 flex flex-col items-center justify-center gap-4 bg-black/85 p-4 backdrop-blur-2xl md:p-12"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div className="lightbox-panel relative max-h-full max-w-full" onClick={(e) => e.stopPropagation()}>
+        <button
+          onClick={onClose}
+          className="absolute -top-12 right-0 flex h-9 w-9 items-center justify-center rounded-full bg-white/10 text-white/70 ring-1 ring-inset ring-white/20 transition-all duration-500 ease-fluid hover:bg-white/20 hover:text-white active:scale-90"
+          aria-label="关闭预览"
+        >
+          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">
+            <path d="M2 2l10 10M12 2L2 12" />
+          </svg>
+        </button>
+        <img
+          src={url}
+          alt="文档插图预览"
+          className="max-h-[82dvh] max-w-full rounded-2xl bg-white object-contain shadow-2xl ring-1 ring-white/15"
+        />
+      </div>
+      <p className="text-[11px] tracking-wide text-white/40">点击图片以外的任意区域，或按 Esc 关闭</p>
+    </div>
+  )
+}
+
 const SUGGESTIONS = [
   '公司年假政策是怎样的？',
   '报销流程需要哪些单据？',
@@ -26,7 +65,7 @@ function AnswerBody({ text, streaming }) {
   )
 }
 
-function SourceCard({ src }) {
+function SourceCard({ src, onImage }) {
   return (
     <div className="flex gap-3 rounded-2xl bg-white/[0.03] p-3.5 ring-1 ring-inset ring-white/[0.06] transition-colors duration-700 ease-fluid hover:bg-white/[0.05]">
       <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-aura/15 text-[11px] font-semibold text-aura ring-1 ring-inset ring-aura/25">
@@ -45,17 +84,15 @@ function SourceCard({ src }) {
           )}
         </div>
         <p className="mt-1 line-clamp-2 text-[12px] leading-relaxed text-white/40">{src.snippet}</p>
-        {/* 文档内嵌图片（架构图等），点击查看原图 */}
+        {/* 文档内嵌图片（架构图等），点击页内灯箱预览 */}
         {src.images?.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-2">
             {src.images.map((u) => (
-              <a
+              <button
                 key={u}
-                href={u}
-                target="_blank"
-                rel="noreferrer"
-                className="group/img block overflow-hidden rounded-xl bg-black/40 ring-1 ring-white/10 transition-all duration-500 ease-fluid hover:ring-aura/40"
-                title="点击查看原图"
+                onClick={() => onImage?.(u)}
+                className="group/img block cursor-zoom-in overflow-hidden rounded-xl bg-black/40 ring-1 ring-white/10 transition-all duration-500 ease-fluid hover:ring-aura/40"
+                title="点击放大预览"
               >
                 <img
                   src={u}
@@ -63,7 +100,7 @@ function SourceCard({ src }) {
                   loading="lazy"
                   className="h-24 w-auto max-w-56 object-contain transition-transform duration-500 ease-fluid group-hover/img:scale-[1.04]"
                 />
-              </a>
+              </button>
             ))}
           </div>
         )}
@@ -72,7 +109,7 @@ function SourceCard({ src }) {
   )
 }
 
-function AssistantMessage({ msg }) {
+function AssistantMessage({ msg, onImage }) {
   const [open, setOpen] = useState(false)
   const sources = msg.sources || []
   const visible = open ? sources : sources.slice(0, 2)
@@ -136,7 +173,7 @@ function AssistantMessage({ msg }) {
           {open && (
             <div className="mt-2.5 grid gap-2 animate-reveal">
               {visible.map((s) => (
-                <SourceCard key={s.index} src={s} />
+                <SourceCard key={s.index} src={s} onImage={onImage} />
               ))}
             </div>
           )}
@@ -150,6 +187,7 @@ export default function ChatView() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
+  const [lightbox, setLightbox] = useState(null)
   const endRef = useRef(null)
 
   useEffect(() => {
@@ -225,7 +263,7 @@ export default function ChatView() {
                 </div>
               ) : (
                 <div key={i} className="animate-reveal">
-                  <AssistantMessage msg={m} />
+                  <AssistantMessage msg={m} onImage={setLightbox} />
                 </div>
               ),
             )}
@@ -233,6 +271,8 @@ export default function ChatView() {
           </div>
         )}
       </div>
+
+      {lightbox && <Lightbox url={lightbox} onClose={() => setLightbox(null)} />}
 
       {/* 输入区：双层边框 + 按钮嵌套按钮 */}
       <div className="sticky bottom-0 z-30 mt-auto bg-gradient-to-t from-void via-void/85 to-transparent pb-6 pt-10 backdrop-blur-xl">
