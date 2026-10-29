@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import ingestion, vectorstore
-from .config import DATA_DIR, settings
+from .config import BASE_DIR, DATA_DIR, settings
 from .rag import chat_stream
 
 app = FastAPI(title="企业知识库 RAG 系统", version="1.0.0")
@@ -100,3 +100,10 @@ async def delete_document(doc_id: str):
     # 同步清理该文档提取出的图片目录
     shutil.rmtree(ingestion.IMAGES_DIR / doc_id, ignore_errors=True)
     return {"ok": True}
+
+
+# ---- 前端生产构建托管（置于路由注册之后，避免遮蔽 /api/*）----
+# 局域网设备直接访问 http://<本机IP>:8010 即可，无需 Vite 开发服务器
+_DIST = BASE_DIR / "frontend" / "dist"
+if _DIST.exists():
+    app.mount("/", StaticFiles(directory=_DIST, html=True), name="spa")

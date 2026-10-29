@@ -4,7 +4,8 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        display: ['"Plus Jakarta Sans"', '"Noto Sans SC"', 'system-ui', 'sans-serif'],
+        // 无外网字体依赖：本机装有 Plus Jakarta Sans 则用之，否则回退系统字体
+        display: ['"Plus Jakarta Sans"', 'system-ui', '-apple-system', '"PingFang SC"', '"Microsoft YaHei"', '"Noto Sans SC"', 'sans-serif'],
       },
       colors: {
         void: '#050505',
