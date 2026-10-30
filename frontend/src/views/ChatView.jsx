@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
-import { streamChat } from '../lib/api'
-import { IconSend, IconSpark, IconQuote } from '../components/icons.jsx'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { deleteConversation, fetchMessages, listConversations, streamChat } from '../lib/api'
+import { IconSend, IconSpark, IconQuote, IconChat, IconTrash } from '../components/icons.jsx'
 
 function Lightbox({ url, onClose }) {
   useEffect(() => {
@@ -188,11 +188,61 @@ export default function ChatView() {
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [lightbox, setLightbox] = useState(null)
+  const [conversations, setConversations] = useState([])
+  const [activeId, setActiveId] = useState(null) // null = 新对话
+  const [drawerOpen, setDrawerOpen] = useState(false)
   const endRef = useRef(null)
+
+  const refreshConversations = useCallback(async () => {
+    try {
+      setConversations(await listConversations())
+    } catch {
+      /* 未登录等场景静默 */
+    }
+  }, [])
+
+  useEffect(() => {
+    refreshConversations()
+  }, [refreshConversations])
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
   }, [messages])
+
+  const switchConversation = async (cid) => {
+    if (busy || cid === activeId) return
+    try {
+      const msgs = await fetchMessages(cid)
+      setMessages(
+        msgs.map((m) => ({
+          role: m.role,
+          content: m.content,
+          mode: m.meta?.mode,
+          sources: m.meta?.sources || [],
+          rewritten: null,
+          question: null,
+        })),
+      )
+      setActiveId(cid)
+      setDrawerOpen(false)
+    } catch {
+      /* 忽略 */
+    }
+  }
+
+  const newConversation = () => {
+    if (busy) return
+    setMessages([])
+    setActiveId(null)
+    setDrawerOpen(false)
+  }
+
+  const removeConversation = async (cid, title) => {
+    if (!window.confirm(`删除会话「${title}」？该操作不可恢复。`)) return
+    await deleteConversation(cid)
+    if (cid === activeId) newConversation()
+    refreshConversations()
+  }
 
   const send = async (text) => {
     const question = (text ?? input).trim()
@@ -200,18 +250,22 @@ export default function ChatView() {
     setInput('')
     setBusy(true)
 
-    const history = messages.map((m) => ({ role: m.role, content: m.content }))
+    const convIdAtSend = activeId
     setMessages((ms) => [...ms, { role: 'user', content: question }, { role: 'assistant', content: '', streaming: true, question }])
 
     const patch = (fn) => setMessages((ms) => ms.map((m, i) => (i === ms.length - 1 ? fn(m) : m)))
 
     try {
-      await streamChat({ message: question, history }, {
+      await streamChat({ message: question, conversationId: convIdAtSend }, {
+        conv: (e) => {
+          if (!convIdAtSend && e.conversation_id) setActiveId(e.conversation_id)
+        },
         meta: (e) => patch((m) => ({ ...m, mode: e.mode, rewritten: e.rewritten_query, sources: e.sources })),
         delta: (e) => patch((m) => ({ ...m, content: m.content + e.text })),
         done: () => patch((m) => ({ ...m, streaming: false })),
         error: (e) => patch((m) => ({ ...m, content: `出错了：${e.message}`, streaming: false })),
       })
+      refreshConversations()
     } catch (err) {
       patch((m) => ({ ...m, content: `无法连接服务：${err.message}`, streaming: false }))
     } finally {
@@ -220,16 +274,92 @@ export default function ChatView() {
     }
   }
 
+  const sidePanel = (
+    <div className="flex h-full flex-col gap-3">
+      <button
+        onClick={newConversation}
+        className="group flex items-center justify-between rounded-2xl bg-white/[0.04] py-3 pl-4 pr-1.5 text-[13px] font-medium text-white/85 ring-1 ring-inset ring-white/[0.08] transition-all duration-500 ease-fluid hover:bg-white/[0.07] active:scale-[0.97]"
+      >
+        开启新对话
+        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-white/[0.07] text-white/60 transition-transform duration-500 ease-fluid group-hover:rotate-90">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+        </span>
+      </button>
+      <p className="px-2 pt-2 text-[10px] font-medium uppercase tracking-[0.2em] text-white/30">历史会话 · {conversations.length}</p>
+      <div className="flex-1 space-y-1.5 overflow-y-auto pr-0.5">
+        {conversations.length === 0 && <p className="px-2 py-4 text-[12px] leading-relaxed text-white/25">还没有历史会话，发送第一条消息后会自动保存。</p>}
+        {conversations.map((c) => (
+          <div
+            key={c.id}
+            className={`group flex cursor-pointer items-center gap-2 rounded-xl px-3 py-2.5 ring-1 ring-inset transition-all duration-500 ease-fluid ${
+              c.id === activeId ? 'bg-white/[0.08] ring-white/[0.14]' : 'ring-transparent hover:bg-white/[0.04]'
+            }`}
+            onClick={() => switchConversation(c.id)}
+          >
+            <IconChat size={14} className={c.id === activeId ? 'shrink-0 text-aura' : 'shrink-0 text-white/30'} />
+            <div className="min-w-0 flex-1">
+              <p className={`truncate text-[13px] ${c.id === activeId ? 'text-white/90' : 'text-white/60'}`}>{c.title}</p>
+              <p className="truncate text-[10px] text-white/25">{c.updated_at}</p>
+            </div>
+            <button
+              onClick={(e) => {
+                e.stopPropagation()
+                removeConversation(c.id, c.title)
+              }}
+              className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-white/0 transition-all duration-500 ease-fluid group-hover:text-white/30 hover:!text-red-300 active:scale-90"
+              aria-label="删除会话"
+            >
+              <IconTrash size={13} />
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+
   return (
-    <div className="flex min-h-[calc(100dvh-10rem)] flex-col">
+    <div className="relative flex min-h-[calc(100dvh-7rem)]">
+      {/* 桌面侧边栏 */}
+      <aside className="hidden w-72 shrink-0 border-r border-white/[0.05] px-4 py-8 md:block lg:w-80">{sidePanel}</aside>
+
+      {/* 移动端抽屉 */}
+      {drawerOpen && (
+        <div className="fixed inset-0 z-40 md:hidden" onClick={() => setDrawerOpen(false)}>
+          <div className="lightbox-backdrop absolute inset-0 bg-black/70 backdrop-blur-2xl" />
+          <div
+            className="animate-reveal absolute inset-y-0 left-0 w-80 max-w-[85vw] bg-[#0b0b0d] p-4 ring-1 ring-white/10"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {sidePanel}
+          </div>
+        </div>
+      )}
+
       {/* 消息区 */}
-      <div className="mx-auto w-full max-w-3xl flex-1 px-4 pt-10 md:pt-16">
+      <div className="mx-auto w-full max-w-3xl flex-1 px-4 pt-8 md:pt-10">
+        <div className="mb-4 flex items-center gap-3 md:hidden">
+          <button
+            onClick={() => setDrawerOpen(true)}
+            className="flex h-9 items-center gap-2 rounded-full bg-white/[0.05] px-4 text-[12px] text-white/70 ring-1 ring-inset ring-white/[0.09] active:scale-[0.97]"
+          >
+            <IconChat size={14} /> 历史会话 {conversations.length > 0 && `(${conversations.length})`}
+          </button>
+          <button
+            onClick={newConversation}
+            className="flex h-9 items-center rounded-full bg-white/[0.05] px-4 text-[12px] text-white/70 ring-1 ring-inset ring-white/[0.09] active:scale-[0.97]"
+          >
+            新对话
+          </button>
+        </div>
+
         {messages.length === 0 ? (
-          <div className="flex flex-col items-center py-16 text-center md:py-28">
+          <div className="flex flex-col items-center py-12 text-center md:py-20">
             <span className="animate-reveal rounded-full bg-white/[0.04] px-3.5 py-1.5 text-[10px] font-medium uppercase tracking-[0.25em] text-white/50 ring-1 ring-inset ring-white/[0.08]">
               RAG · RETRIEVAL AUGMENTED
             </span>
-            <h1 className="mt-7 animate-reveal text-[2.6rem] font-bold leading-[1.1] tracking-tight text-white [animation-delay:100ms] md:text-6xl">
+            <h1 className="mt-7 animate-reveal text-[2.2rem] font-bold leading-[1.1] tracking-tight text-white [animation-delay:100ms] md:text-5xl">
               向企业知识库
               <span className="block bg-gradient-to-r from-aura via-white to-ember bg-clip-text text-transparent">
                 提出你的问题
@@ -275,8 +405,8 @@ export default function ChatView() {
       {lightbox && <Lightbox url={lightbox} onClose={() => setLightbox(null)} />}
 
       {/* 输入区：双层边框 + 按钮嵌套按钮 */}
-      <div className="sticky bottom-0 z-30 mt-auto bg-gradient-to-t from-void via-void/85 to-transparent pb-6 pt-10 backdrop-blur-xl">
-        <div className="mx-auto w-full max-w-3xl px-4">
+      <div className="fixed inset-x-0 bottom-0 z-30 bg-gradient-to-t from-void via-void/85 to-transparent pb-6 pt-10 backdrop-blur-xl">
+        <div className="mx-auto w-full max-w-3xl px-4 md:max-w-[42rem]">
           <div className="rounded-[2rem] bg-white/[0.05] p-1.5 ring-1 ring-white/[0.09] transition-all duration-700 ease-fluid focus-within:ring-aura/40">
             <div className="flex items-end gap-3 rounded-[calc(2rem-0.375rem)] bg-[#0b0b0d] px-5 py-3.5 shadow-[inset_0_1px_1px_rgba(255,255,255,0.06)]">
               <textarea

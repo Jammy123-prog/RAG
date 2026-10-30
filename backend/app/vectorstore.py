@@ -52,7 +52,7 @@ def search(query: str, top_k: int | None = None) -> list[tuple[Document, float]]
     return sorted(scored, key=lambda x: x[1], reverse=True)
 
 
-def register_document(name: str, chunks: int, size: int, doc_id: str | None = None) -> str:
+def register_document(name: str, chunks: int, size: int, doc_id: str | None = None, owner: str | None = None) -> str:
     """登记文档。doc_id 必须与分片元数据中的 doc_id 一致，否则删除时会清不掉向量。"""
     reg = _load_registry()
     doc_id = doc_id or str(uuid.uuid4())[:8]
@@ -61,6 +61,7 @@ def register_document(name: str, chunks: int, size: int, doc_id: str | None = No
         "name": name,
         "chunks": chunks,
         "size": size,
+        "owner": owner,
         "uploaded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "status": "ready",
     }

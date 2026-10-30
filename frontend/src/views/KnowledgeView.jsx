@@ -23,12 +23,17 @@ function UploadingCard({ name }) {
   )
 }
 
-export default function KnowledgeView({ onStatsChange }) {
+export default function KnowledgeView({ user, onStatsChange }) {
   const [docs, setDocs] = useState([])
   const [dragging, setDragging] = useState(false)
   const [uploading, setUploading] = useState([])
   const [toast, setToast] = useState(null)
+  const [search, setSearch] = useState('')
   const inputRef = useRef(null)
+
+  const filtered = search.trim()
+    ? docs.filter((d) => d.name.toLowerCase().includes(search.trim().toLowerCase()))
+    : docs
 
   const refresh = useCallback(async () => {
     try {
@@ -146,16 +151,36 @@ export default function KnowledgeView({ onStatsChange }) {
       {/* 文档列表 */}
       {docs.length > 0 && (
         <div className="mt-14 animate-reveal [animation-delay:150ms]">
-          <div className="mb-5 flex items-baseline justify-between px-1">
+          <div className="mb-5 flex flex-wrap items-center justify-between gap-3 px-1">
             <h2 className="text-[15px] font-semibold tracking-wide text-white/70">已入库文档</h2>
-            <span className="text-[12px] text-white/30">{docs.length} 份</span>
+            <div className="flex items-center gap-3">
+              {docs.length > 5 && (
+                <div className="flex items-center gap-2 rounded-full bg-white/[0.04] py-1.5 pl-3.5 pr-2 ring-1 ring-inset ring-white/[0.08] transition-all duration-500 ease-fluid focus-within:ring-aura/40">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" className="shrink-0 text-white/30">
+                    <circle cx="11" cy="11" r="7" />
+                    <path d="m20 20-3.5-3.5" strokeLinecap="round" />
+                  </svg>
+                  <input
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                    placeholder="搜索文档名…"
+                    className="w-32 bg-transparent text-[12px] text-white/85 outline-none placeholder:text-white/25 sm:w-44"
+                  />
+                </div>
+              )}
+              <span className="text-[12px] text-white/30">
+                {search ? `${filtered.length}/${docs.length}` : `${docs.length}`} 份
+              </span>
+            </div>
           </div>
           <div className="grid gap-3">
-            {docs.map((d, i) => (
+            {filtered.map((d, i) => {
+              const canDelete = user?.role === 'admin' || !d.owner || d.owner === user?.username
+              return (
               <div
                 key={d.doc_id}
                 className="group flex items-center gap-4 rounded-[1.5rem] bg-white/[0.03] p-1.5 ring-1 ring-inset ring-white/[0.06] transition-all duration-700 ease-fluid animate-reveal hover:bg-white/[0.05] hover:ring-white/[0.1]"
-                style={{ animationDelay: `${i * 60}ms` }}
+                style={{ animationDelay: `${Math.min(i, 10) * 60}ms` }}
               >
                 <div className="flex w-full items-center gap-4 rounded-[calc(1.5rem-0.375rem)] bg-[#0b0b0d] px-5 py-4">
                   <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-white/[0.05] text-white/70 ring-1 ring-inset ring-white/[0.08]">
@@ -163,23 +188,46 @@ export default function KnowledgeView({ onStatsChange }) {
                   </span>
                   <div className="min-w-0 flex-1">
                     <p className="truncate text-[14px] font-medium text-white/85">{d.name}</p>
-                    <p className="mt-1 text-[12px] text-white/35">
-                      {d.uploaded_at} · {d.chunks} 个分片 · {fmtSize(d.size)}
+                    <p className="mt-1 truncate text-[12px] text-white/35">
+                      {d.uploaded_at} · {d.chunks} 个分片{d.images ? ` · ${d.images} 张图` : ''} · {fmtSize(d.size)}
                     </p>
                   </div>
+                  {d.owner && (
+                    <span className="hidden shrink-0 rounded-full bg-white/[0.05] px-2.5 py-1 text-[10px] text-white/40 ring-1 ring-inset ring-white/[0.08] md:block">
+                      {d.owner}
+                    </span>
+                  )}
                   <span className="hidden shrink-0 rounded-full bg-ember/10 px-2.5 py-1 text-[10px] font-medium text-ember ring-1 ring-inset ring-ember/20 sm:block">
                     已向量化
                   </span>
-                  <button
-                    onClick={() => remove(d.doc_id, d.name)}
-                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white/25 transition-all duration-500 ease-fluid hover:bg-red-400/10 hover:text-red-300 active:scale-90"
-                    aria-label="删除文档"
-                  >
-                    <IconTrash size={16} />
-                  </button>
+                  {canDelete ? (
+                    <button
+                      onClick={() => remove(d.doc_id, d.name)}
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white/25 transition-all duration-500 ease-fluid hover:bg-red-400/10 hover:text-red-300 active:scale-90"
+                      aria-label="删除文档"
+                    >
+                      <IconTrash size={16} />
+                    </button>
+                  ) : (
+                    <span
+                      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white/15"
+                      title={`仅管理员或上传者（${d.owner}）可删除`}
+                    >
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">
+                        <rect x="5" y="11" width="14" height="9" rx="2" />
+                        <path d="M8 11V7a4 4 0 0 1 8 0v4" />
+                      </svg>
+                    </span>
+                  )}
                 </div>
               </div>
-            ))}
+              )
+            })}
+            {search && filtered.length === 0 && (
+              <p className="rounded-2xl bg-white/[0.03] px-4 py-6 text-center text-[13px] text-white/35">
+                没有匹配「{search}」的文档
+              </p>
+            )}
           </div>
         </div>
       )}

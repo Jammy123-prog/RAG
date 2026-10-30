@@ -240,7 +240,7 @@ def page_image_urls(doc_id: str | None, pages: list[int] | None) -> list[str]:
     return urls
 
 
-def ingest_file(path: Path, display_name: str | None = None) -> dict:
+def ingest_file(path: Path, display_name: str | None = None, owner: str | None = None) -> dict:
     """单文件入库：返回文档注册信息。"""
     name = display_name or path.name
     doc_id = str(uuid.uuid4())[:8]
@@ -254,7 +254,7 @@ def ingest_file(path: Path, display_name: str | None = None) -> dict:
     n_images = _extract_pdf_images(path, doc_id) if path.suffix.lower() == ".pdf" else 0
     if path.suffix.lower() == ".pdf":  # 含页面快照（矢量图纸页）
         n_images += len(list((IMAGES_DIR / doc_id).glob("*_snapshot.png")))
-    info = vectorstore.register_document(name, chunks=len(docs), size=path.stat().st_size, doc_id=doc_id)
+    info = vectorstore.register_document(name, chunks=len(docs), size=path.stat().st_size, doc_id=doc_id, owner=owner)
     info["images"] = n_images
     return info
 

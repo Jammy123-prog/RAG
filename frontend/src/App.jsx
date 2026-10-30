@@ -1,18 +1,53 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import ChatView from './views/ChatView.jsx'
 import KnowledgeView from './views/KnowledgeView.jsx'
+import LoginView from './views/LoginView.jsx'
 import OverviewView from './views/OverviewView.jsx'
-import { IconChat, IconVault, IconPulse } from './components/icons.jsx'
-
-const TABS = [
-  { key: 'overview', label: '概览', icon: IconPulse },
-  { key: 'chat', label: '对话', icon: IconChat },
-  { key: 'vault', label: '知识库', icon: IconVault },
-]
+import UsersView from './views/UsersView.jsx'
+import { fetchMe, setToken, setUnauthorizedHandler } from './lib/api'
+import { IconChat, IconVault, IconPulse, IconUsers } from './components/icons.jsx'
 
 export default function App() {
-  const [tab, setTab] = useState('overview')
+  const [user, setUser] = useState(null)
+  const [checking, setChecking] = useState(true)
+  const [tab, setTab] = useState('chat')
   const [statsVersion, setStatsVersion] = useState(0)
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => setUser(null))
+    fetchMe()
+      .then((u) => u && setUser(u))
+      .catch(() => {})
+      .finally(() => setChecking(false))
+  }, [])
+
+  const logout = () => {
+    setToken(null)
+    setUser(null)
+    setTab('chat')
+  }
+
+  if (checking) {
+    return (
+      <div className="grain flex min-h-[100dvh] items-center justify-center bg-void">
+        <div className="flex gap-2">
+          {[0, 1, 2].map((i) => (
+            <span key={i} className="h-2 w-2 animate-bounce rounded-full bg-white/40" style={{ animationDelay: `${i * 150}ms` }} />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) return <LoginView onLogin={setUser} />
+
+  const isAdmin = user.role === 'admin'
+  const TABS = [
+    { key: 'chat', label: '对话', icon: IconChat },
+    { key: 'vault', label: '知识库', icon: IconVault },
+    { key: 'overview', label: '概览', icon: IconPulse },
+    ...(isAdmin ? [{ key: 'users', label: '用户', icon: IconUsers }] : []),
+  ]
 
   return (
     <div className="grain relative min-h-[100dvh] overflow-x-clip">
@@ -40,13 +75,25 @@ export default function App() {
                 tab === key ? 'text-white' : 'text-white/40 hover:text-white/75'
               }`}
             >
-              {tab === key && (
-                <span className="absolute inset-0 rounded-full bg-white/[0.09] ring-1 ring-inset ring-white/[0.12]" />
-              )}
+              {tab === key && <span className="absolute inset-0 rounded-full bg-white/[0.09] ring-1 ring-inset ring-white/[0.12]" />}
               <Icon size={15} className="relative" />
-              <span className="relative">{label}</span>
+              <span className="relative hidden sm:block">{label}</span>
             </button>
           ))}
+          {/* 用户身份 + 登出 */}
+          <span className="mx-1 hidden h-5 w-px bg-white/10 md:block" />
+          <button
+            onClick={logout}
+            className="group ml-1 mr-2 flex items-center gap-2 rounded-full py-1.5 pl-3 pr-1.5 text-[12px] text-white/50 transition-colors duration-500 ease-fluid hover:text-white/90 active:scale-[0.96]"
+            title="退出登录"
+          >
+            <span className="max-w-24 truncate">{user.username}</span>
+            <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/[0.06] ring-1 ring-inset ring-white/[0.1] transition-transform duration-500 ease-fluid group-hover:translate-x-0.5">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M9 3H5c-.6 0-1 .4-1 1v16c0 .6.4 1 1 1h4M16 17l5-5-5-5M21 12H9" />
+              </svg>
+            </span>
+          </button>
         </div>
       </nav>
 
@@ -54,7 +101,8 @@ export default function App() {
       <main key={tab} className="relative z-10 animate-reveal">
         {tab === 'overview' && <OverviewView statsVersion={statsVersion} />}
         {tab === 'chat' && <ChatView />}
-        {tab === 'vault' && <KnowledgeView onStatsChange={() => setStatsVersion((v) => v + 1)} />}
+        {tab === 'vault' && <KnowledgeView user={user} onStatsChange={() => setStatsVersion((v) => v + 1)} />}
+        {tab === 'users' && isAdmin && <UsersView me={user} />}
       </main>
     </div>
   )
