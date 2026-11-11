@@ -1,6 +1,6 @@
-# 企业知识库 RAG 系统 —— 一键拉起 Ollama（Qwen3-14B + bge-m3）
+# 企业知识库 RAG 系统 —— 一键拉起 Ollama（Qwen3-14B + bge-m3）与 Neo4j（知识图谱）
 # 用法：
-#   docker compose up -d ollama
+#   docker compose up -d ollama neo4j
 #   docker compose exec ollama ollama pull qwen3:14b
 #   docker compose exec ollama ollama pull bge-m3
 #   cp .env.example .env && uvicorn backend.app.main:app --port 8000
@@ -23,5 +23,18 @@ services:
     #           count: all
     #           capabilities: [gpu]
 
+  neo4j:
+    image: neo4j:5-community
+    container_name: kb-neo4j
+    ports:
+      - '7474:7474'  # HTTP 管理界面
+      - '7687:7687'  # Bolt
+    environment:
+      - NEO4J_AUTH=neo4j/nexuskb123
+    volumes:
+      - neo4j_data:/data
+    restart: unless-stopped
+
 volumes:
   ollama_models:
+  neo4j_data:

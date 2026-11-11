@@ -7,6 +7,55 @@
 
 ---
 
+## v1.2 —— 知识图谱增强检索 + 文档在线预览（2026-11-11）
+
+参照 GraphRAG / RAGFlow Knowledge Graph 的轻量落地：
+
+**知识图谱（新增模块）**
+
+- `backend/app/kg.py`：每份文档采样若干分片，一次 LLM 调用抽取核心实体（严格 JSON 数组输出）；
+  建图 `(:Document)-[:MENTIONS {weight}]->(:Entity)`，共享实体的文档对生成 `(:Document)-[:RELATED {shared}]->(:Document)`
+- **图增强检索**：问题命中实体 → 邻居文档分片作为第二路召回，与向量多路召回按 **RRF** 融合，
+  来源卡片标注「来自图谱关联」
+- 接口：`/api/kg/graph`、`/api/kg/build`、`/api/kg/entities`、`/api/kg/entity/{name}`
+- 前端新增「图谱」页：ECharts 力导向图 + 实体详情 + 文档关联，支持「一键提问」跳转对话
+- 部署：`docker-compose.yml` 增加 `neo4j:5-community`（7474/7687 + `neo4j_data` 卷），`requirements.txt` 增加 `neo4j==5.28.1`；
+  Neo4j 未启动时接口返回 `available=false`，前端给出部署提示，不影响其他功能
+
+**文档在线预览**
+
+- `backend/app/preview.py` 两级能力：**页面级渲染**（PDF 用 PyMuPDF 逐页出图；DOCX/XLSX 经 LibreOffice 无头转 PDF；
+  MD/TXT/CSV 用 PyMuPDF Story 排版成 A4 页）→ 失败时降级 HTML / 纯文本，保证「任何文档都能点开」
+- 接口：`/api/documents/{id}/preview|file|pages|page/{no}`
+- 前端：知识库列表与对话「引用来源」卡片均可点开原文（`DocumentPreview` / `DocumentViewer`），
+  文档内嵌图片支持页内灯箱（滚轮缩放、拖拽平移、双击复位）
+
+**知识库多级文件夹**
+
+- 多级文件夹树：根/子文件夹新建、删除（文档回退上一级而非删除）、收起展开；切换「公有 / 个人」归属
+- 接口：`GET/POST /api/folders`、`DELETE /api/folders/{id}`
+- 文档列表支持拖拽上传到当前文件夹、关键词 + 语义合并搜索
+- **「未分组」归入文件夹层级**：由「全部文档」旁的独立伪节点改为根层级文件夹节点，与根文件夹共用
+  `paddingLeft: 6 + depth*14` + 20px 箭头占位的缩进规则（图标 30px / 文字 52px 严格对齐），选中态统一为 `aura`，
+  消除原先 20px 的视觉错层；数据语义不变（`folder_id == null` 的文档集合，不计入「文件夹 · N」）
+
+**对话增强**
+
+- 新增 `strong_hit_threshold=0.5` 强命中阈值：最高分仍低于该值视为弱命中，回退模型兜底并标注
+- 来源卡片展示匹配度、页码、「个人 / 公有」归属与「语义匹配 / 名称 + 语义」标记
+- **历史提问**：输入框左侧新增入口（`IconList`），向上展开浮层，按「本对话 / 其他对话」分组；
+  记录结构升级为 `{ q, cid }[]` 落 `localStorage`（上限 30 条，兼容旧版纯字符串）；
+  点击条目**定位并高亮**消息流中对应提问（1.8s 渐隐光圈），其他对话条目先自动切换会话再定位，无法定位时回填输入框；
+  新会话首条提问在 SSE `conv` 事件拿到 `conversation_id` 后补写 `cid`，删除会话时同步清理其历史
+- 检索范围按用户可见性过滤：公有知识库 + 本人私有知识库（管理员为全部）
+
+**界面**
+
+- 导航改为固定悬浮胶囊样式，新增「图谱」入口，右上角用户信息与登出
+- 新增 `IconList` / `IconGraph` 等超细线图标
+
+---
+
 ## v1.1 —— 多用户与会话管理（2026-10-30）
 
 参照 Dify / FastGPT 的多租户与会话模型：

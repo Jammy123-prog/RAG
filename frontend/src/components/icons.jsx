@@ -95,3 +95,18 @@ export const IconQuote = (p) => (
     <path d="M5 15c0-4.5 2.5-7 6-8l.5 1C9 9.5 8 10.8 8 12h2v6H5v-3ZM13 15c0-4.5 2.5-7 6-8l.5 1c-2.5 1.5-3.5 2.8-3.5 4h2v6h-5v-3Z" />
   </I>
 )
+
+export const IconList = (p) => (
+  <I {...p}>
+    <path d="M4 6h16M4 12h16M4 18h10" />
+  </I>
+)
+
+export const IconGraph = (p) => (
+  <I {...p}>
+    <circle cx="5.5" cy="6" r="2.5" />
+    <circle cx="18.5" cy="5.5" r="2.5" />
+    <circle cx="12" cy="18" r="2.5" />
+    <path d="M7.7 7.2 11 15.8M17.4 7.6l-3.7 8.1M7.9 6.2l8.1-.6" />
+  </I>
+)

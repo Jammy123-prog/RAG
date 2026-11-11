@@ -39,7 +39,7 @@ export default function OverviewView({ statsVersion }) {
   const alive = !!health
 
   return (
-    <div className="mx-auto w-full max-w-6xl px-4 pb-24 pt-16 md:pt-24">
+    <div className="mx-auto w-full max-w-6xl px-4 pb-24 pt-28">
       <span className="animate-reveal rounded-full bg-white/[0.04] px-3.5 py-1.5 text-[10px] font-medium uppercase tracking-[0.25em] text-white/50 ring-1 ring-inset ring-white/[0.08]">
         SYSTEM OVERVIEW
       </span>

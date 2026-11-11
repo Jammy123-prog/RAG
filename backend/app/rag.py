@@ -7,7 +7,7 @@
 import re
 from typing import AsyncIterator
 
-from . import vectorstore
+from . import kg, vectorstore
 from .config import settings
 from .ingestion import page_image_urls
 from .llm import get_llm
@@ -47,9 +47,10 @@ FALLBACK_PROMPT = (
 
 
 def build_context(docs: list) -> str:
+    """docs 元素为 (Document, score) 或 (Document, score, via_graph)，统一取文档本体。"""
     return "\n\n".join(
-        f"[{i + 1}] 来源：{d.metadata.get('source', '未知')}\n内容：{d.page_content}"
-        for i, (d, _score) in enumerate(docs)
+        f"[{i + 1}] 来源：{item[0].metadata.get('source', '未知')}\n内容：{item[0].page_content}"
+        for i, item in enumerate(docs)
     )
 
 
@@ -93,11 +94,11 @@ async def prepare_queries(question: str, history: list[dict]) -> tuple[str, list
         return question, [question]  # 预处理失败不阻塞主流程
 
 
-def _multi_query_retrieve(variants: list[str]) -> list[tuple]:
+def _multi_query_retrieve(variants: list[str], allowed=None) -> list[tuple]:
     """多路召回 + 按 chunk 去重（保留每片的最高分），再截取 Top-K。"""
     merged: dict[str, tuple] = {}
     for q in dict.fromkeys(variants):
-        for d, s in vectorstore.search(q):
+        for d, s in vectorstore.search(q, allowed=allowed):
             cid = d.metadata.get("chunk_id", d.page_content[:32])
             if cid not in merged or s > merged[cid][1]:
                 merged[cid] = (d, s)
@@ -109,28 +110,73 @@ def _chunk_pages(d) -> list[int]:
     return [int(x) for x in raw.split(",") if x.strip().isdigit()]
 
 
-async def chat_stream(question: str, history: list[dict]) -> AsyncIterator[dict]:
+def _rrf_fuse(vector_hits: list[tuple], graph_hits: list[tuple], k: int = 60) -> list[dict]:
+    """RRF（Reciprocal Rank Fusion）融合两路召回（参照 Dify 多路召回融合实践）。
+
+    每路按排名贡献 1/(k+rank+1) 分，累加后重排；保留每片的最高向量相似度，
+    供后续阈值过滤与前端展示。返回 [{doc, sim, rrf, graph}]，graph 标记是否
+    由图谱一路引入（前端来源卡片会标注「图谱召回」）。
+    """
+    fused: dict[str, dict] = {}
+    for label, hits in (("vector", vector_hits), ("graph", graph_hits)):
+        for rank, (d, s) in enumerate(hits):
+            cid = d.metadata.get("chunk_id", d.page_content[:32])
+            e = fused.setdefault(cid, {"doc": d, "sim": 0.0, "rrf": 0.0, "graph": False})
+            e["rrf"] += 1 / (k + rank + 1)
+            e["sim"] = max(e["sim"], s)
+            if label == "graph":
+                e["graph"] = True
+    return sorted(fused.values(), key=lambda x: x["rrf"], reverse=True)
+
+
+async def chat_stream(question: str, history: list[dict], viewer: dict | None = None) -> AsyncIterator[dict]:
     """主流程，按事件流产出 dict：
     {type: "meta", mode, rewritten_query, sources}
     {type: "delta", text}
     {type: "done"}
+
+    viewer: {"username", "role"}，用于个人/公有知识库检索范围过滤（个人 + 公有）。
     """
     rewritten, variants = await prepare_queries(question, history)
 
-    # 多语言多路召回 + 阈值过滤（文章特性 2：检索失败时回退到大模型直接回答）
-    results = _multi_query_retrieve(variants)
-    hits = [(d, s) for d, s in results if s >= settings.sim_threshold]
+    # 检索可见范围：公有知识库 + 本人私有知识库（管理员可见全部）
+    allowed = None
+    if viewer and viewer.get("role") != "admin":
+        username = viewer.get("username")
 
+        def allowed(meta: dict) -> bool:
+            return meta.get("scope", "public") == "public" or meta.get("owner") in (None, username)
+
+    # 多语言多路召回 + 图增强召回（图谱命中的实体 → 邻居文档分片）+ RRF 融合
+    results = _multi_query_retrieve(variants, allowed)
+    graph_hits: list[tuple] = []
+    if settings.kg_enhance:
+        graph_hits = kg.neighbor_chunks(
+            rewritten, allowed,
+            max_docs=settings.kg_graph_max_docs,
+            per_doc=settings.kg_graph_chunks_per_doc,
+        )
+    fused = _rrf_fuse(results, graph_hits)
+    hits = [(e["doc"], e["sim"], e["graph"]) for e in fused if e["sim"] >= settings.sim_threshold]
+    # 弱命中判定：最高分仍达不到强命中阈值 → 大概率是低相关误命中（如闲聊/寒暄），
+    # 不强行套资料回答，整体回退模型兜底
+    if hits and max(s for _, s, _ in hits) < settings.strong_hit_threshold:
+        hits = []
+
+    graph_docs = sorted({d.metadata.get("source", "") for d, s, g in hits if g} - {""})
     sources = [
         {
             "index": i + 1,
+            "doc_id": d.metadata.get("doc_id"),  # 前端据此打开文档预览
             "source": d.metadata.get("source", "未知"),
             "snippet": d.page_content[:200],
             "score": round(s, 3),
+            "scope": d.metadata.get("scope", "public"),
             "pages": _chunk_pages(d),
             "images": page_image_urls(d.metadata.get("doc_id"), _chunk_pages(d)),
+            "graph": g,
         }
-        for i, (d, s) in enumerate(hits)
+        for i, (d, s, g) in enumerate(hits)
     ]
     mode = "rag" if hits else "fallback"
 
@@ -146,7 +192,7 @@ async def chat_stream(question: str, history: list[dict]) -> AsyncIterator[dict]
     else:
         prompt = FALLBACK_PROMPT.format(question=question)
 
-    yield {"type": "meta", "mode": mode, "rewritten_query": rewritten, "sources": sources}
+    yield {"type": "meta", "mode": mode, "rewritten_query": rewritten, "sources": sources, "graph_docs": graph_docs}
 
     llm = get_llm(streaming=True)
     async for chunk in llm.astream(prompt):

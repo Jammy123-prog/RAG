@@ -3,6 +3,7 @@ data/
 logs/
 *.ocr.txt
 nohup.out
+*.log
 
 # 环境与密钥
 .env

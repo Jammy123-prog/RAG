@@ -28,9 +28,21 @@ class Settings(BaseSettings):
     chunk_size: int = 500
     chunk_overlap: int = 80
     top_k: int = 6
-    sim_threshold: float = 0.35
+    sim_threshold: float = 0.35        # 检索召回阈值：低于此分的分片不进入上下文
+    strong_hit_threshold: float = 0.5  # 强命中阈值：最高分仍低于此值视为弱命中（误命中），回退模型兜底
     # 跨语言检索：查询自动改写+中英互译，双路召回合并（中文问题可命中英文资料）
     cross_lingual: bool = True
+
+    # 知识图谱（Neo4j，新增模块）
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_user: str = "neo4j"
+    neo4j_password: str = "nexuskb123"
+    kg_entities_per_doc: int = 12  # 每份文档抽取的实体/概念数上限
+    kg_sample_chunks: int = 8      # 每份文档参与抽取的分片采样数
+    kg_max_entity_nodes: int = 60  # 可视化返回的实体节点数上限（按关联文档数排序）
+    kg_enhance: bool = True             # 图增强检索：问题命中实体 → 邻居文档参与召回（RRF 融合）
+    kg_graph_max_docs: int = 3          # 图增强时最多补充的邻居文档数
+    kg_graph_chunks_per_doc: int = 2    # 每个邻居文档补充的分片数
 
     # OCR（扫描件自动识别，PaddleOCR PP-OCRv6 运行于独立 paddle 环境，页级自适应）
     ocr_enabled: bool = True
