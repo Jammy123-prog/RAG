@@ -255,6 +255,14 @@ def _visible_doc(d: dict, user: dict) -> bool:
     return perms.Ctx().doc_role(d, user) is not None
 
 
+def _visible_doc_ids(user: dict) -> set[str] | None:
+    """当前用户可见的文档 id 集合；管理员返回 None 表示不做过滤。"""
+    if user.get("role") == "admin":
+        return None
+    ctx = perms.Ctx()
+    return {d["doc_id"] for d in vectorstore.list_documents() if ctx.doc_role(d, user) is not None}
+
+
 @app.get("/api/folders")
 async def list_folders(user: dict = Depends(get_user)):
     """文件夹列表（附文档数与当前用户的角色）：可见性走成员权限规则。"""
@@ -506,13 +514,26 @@ def _acl_target(resource_type: str, resource_id: str) -> dict | None:
     return None
 
 
+@app.get("/api/users/directory")
+async def users_directory(user: dict = Depends(get_user)):
+    """成员选择用的用户目录：只返回用户名，不含角色与创建时间。"""
+    return [{"username": u["username"]} for u in store.list_users()]
+
+
+def _require_acl_manager(user: dict, info: dict) -> None:
+    """成员权限的配置人：管理员，或该资源的创建者（WPS 里「我分享」的语义）。"""
+    if user.get("role") == "admin" or info.get("owner") == user.get("username"):
+        return
+    raise HTTPException(403, "仅管理员或该资源创建者可设置成员权限")
+
+
 @app.get("/api/acl")
 async def get_acl(resource_type: str, resource_id: str, user: dict = Depends(get_user)):
-    """查看文件夹 / 文档的可见范围与成员（管理员）。"""
-    require_admin(user)
+    """查看文件夹 / 文档的可见范围与成员（管理员或资源创建者）。"""
     info = _acl_target(resource_type, resource_id)
     if not info:
         raise HTTPException(404, "资源不存在")
+    _require_acl_manager(user, info)
     return {
         "resource_type": resource_type,
         "resource_id": resource_id,
@@ -525,14 +546,15 @@ async def get_acl(resource_type: str, resource_id: str, user: dict = Depends(get
 
 @app.put("/api/acl")
 async def put_acl(form: AclForm, user: dict = Depends(get_user)):
-    """覆盖式保存成员权限（管理员）：可见范围 + 成员角色。"""
-    require_admin(user)
+    """覆盖式保存成员权限（管理员或资源创建者）：可见范围 + 成员角色。"""
     if form.resource_type not in ("folder", "doc"):
         raise HTTPException(400, "resource_type 仅支持 folder / doc")
     if form.access not in ("open", "restricted"):
         raise HTTPException(400, "access 仅支持 open / restricted")
-    if not _acl_target(form.resource_type, form.resource_id):
+    info = _acl_target(form.resource_type, form.resource_id)
+    if not info:
         raise HTTPException(404, "资源不存在")
+    _require_acl_manager(user, info)
 
     valid = {u["username"] for u in store.list_users()}
     seen: set[str] = set()
@@ -560,13 +582,14 @@ async def put_acl(form: AclForm, user: dict = Depends(get_user)):
 
 @app.get("/api/kg/graph")
 async def kg_graph(include_entities: bool = True, user: dict = Depends(get_user)):
-    """知识图谱可视化数据（ECharts graph：nodes/links），含构建状态与 Neo4j 可用性。"""
-    return kg.get_graph(include_entities=include_entities)
+    """知识图谱可视化数据（ECharts graph：nodes/links），按成员可见范围过滤。"""
+    return kg.get_graph(include_entities=include_entities, visible=_visible_doc_ids(user))
 
 
 @app.post("/api/kg/build")
 async def kg_build(user: dict = Depends(get_user)):
-    """后台重建知识图谱：逐文档 LLM 抽取实体 + 生成文档关联。"""
+    """后台重建知识图谱：逐文档 LLM 抽取实体 + 生成文档关联（仅管理员）。"""
+    require_admin(user)
     if not kg.available():
         raise HTTPException(503, "Neo4j 未连接，请先启动：docker compose up -d neo4j")
     if not kg.start_build_async():
@@ -576,8 +599,8 @@ async def kg_build(user: dict = Depends(get_user)):
 
 @app.get("/api/kg/entities")
 async def kg_entities(q: str = "", user: dict = Depends(get_user)):
-    """实体搜索（图谱页搜索框）：按关键词模糊匹配，返回 [{name, deg}]。"""
-    return kg.search_entities(q.strip(), limit=10)
+    """实体搜索（图谱页搜索框）：按关键词模糊匹配，deg 只统计当前用户可见的文档。"""
+    return kg.search_entities(q.strip(), limit=10, visible=_visible_doc_ids(user))
 
 
 @app.get("/api/kg/entity/{name}")
@@ -585,7 +608,7 @@ async def kg_entity_detail(name: str, user: dict = Depends(get_user)):
     """实体节点详情：关联文档 + 每份文档命中的原文片段（页码溯源）。"""
     if not kg.available():
         raise HTTPException(503, "Neo4j 未连接")
-    detail = kg.entity_detail(name)
+    detail = kg.entity_detail(name, visible=_visible_doc_ids(user))
     if not detail or not detail["docs"]:
         raise HTTPException(404, "实体不存在")
     return detail

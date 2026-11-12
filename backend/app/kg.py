@@ -268,8 +268,18 @@ def remove_document(doc_id: str) -> bool:
         return False
 
 
-def get_graph(include_entities: bool = True) -> dict:
-    """返回 ECharts graph 数据：nodes/links + 构建状态 + Neo4j 可用性。"""
+def _doc_ids(visible: set[str] | None) -> list[str]:
+    """可见文档 id 列表：None 表示全部可见。"""
+    if visible is not None:
+        return list(visible)
+    return [d["doc_id"] for d in vectorstore.list_documents()]
+
+
+def get_graph(include_entities: bool = True, visible: set[str] | None = None) -> dict:
+    """返回 ECharts graph 数据：nodes/links + 构建状态 + Neo4j 可用性。
+
+    visible: 当前用户可见的 doc_id 集合（None = 全部）；不可见文档及其实体边不返回。
+    """
     result = {"available": available(), "status": build_status(), "nodes": [], "links": []}
     if not result["available"] or _status["state"] == "running":
         return result
@@ -282,6 +292,8 @@ def get_graph(include_entities: bool = True) -> dict:
                 "d.scope AS scope, d.chunks AS chunks, "
                 "[(d)-[:MENTIONS]->(e) | e.name] AS entities"
             ).data()
+            if visible is not None:
+                docs = [d for d in docs if d["id"] in visible]
             doc_ids = {d["id"] for d in docs}
             nodes = [
                 {
@@ -296,15 +308,16 @@ def get_graph(include_entities: bool = True) -> dict:
                 for d in docs
             ]
             links = []
-            if include_entities:
+            if include_entities and doc_ids:
                 ents = session.run(
                     """
                     MATCH (e:Entity)<-[:MENTIONS]-(d:Document)
+                    WHERE d.doc_id IN $ids
                     WITH e, count(d) AS deg
                     ORDER BY deg DESC, e.name LIMIT $limit
                     RETURN e.name AS name, deg
                     """,
-                    limit=settings.kg_max_entity_nodes,
+                    ids=list(doc_ids), limit=settings.kg_max_entity_nodes,
                 ).data()
                 ent_ids = {e["name"] for e in ents}
                 nodes += [
@@ -314,7 +327,9 @@ def get_graph(include_entities: bool = True) -> dict:
                 ]
                 for rel in session.run(
                     "MATCH (d:Document)-[r:MENTIONS]->(e:Entity) "
-                    "RETURN d.doc_id AS s, e.name AS t, r.weight AS w"
+                    "WHERE d.doc_id IN $ids "
+                    "RETURN d.doc_id AS s, e.name AS t, r.weight AS w",
+                    ids=list(doc_ids),
                 ).data():
                     if rel["t"] in ent_ids:
                         links.append({"source": rel["s"], "target": f"e:{rel['t']}",
@@ -336,20 +351,23 @@ def get_graph(include_entities: bool = True) -> dict:
 
 # ---------------- 实体搜索与节点详情 ----------------
 
-def search_entities(q: str, limit: int = 10) -> list[dict]:
-    """按关键词搜索实体（图谱页搜索框），返回 [{name, deg}]，deg 为关联文档数。"""
+def search_entities(q: str, limit: int = 10, visible: set[str] | None = None) -> list[dict]:
+    """按关键词搜索实体（图谱页搜索框），返回 [{name, deg}]，deg 为当前用户可见的关联文档数。"""
     if not available() or not q:
+        return []
+    ids = _doc_ids(visible)
+    if not ids:
         return []
     try:
         with _get_driver().session() as session:
             rows = session.run(
                 """
-                MATCH (e:Entity)<-[:MENTIONS]-()
-                WHERE e.name CONTAINS $q
-                RETURN e.name AS name, count(*) AS deg
+                MATCH (d:Document)-[:MENTIONS]->(e:Entity)
+                WHERE e.name CONTAINS $q AND d.doc_id IN $ids
+                RETURN e.name AS name, count(d) AS deg
                 ORDER BY deg DESC, size(e.name) ASC, name LIMIT $limit
                 """,
-                q=q, limit=limit,
+                q=q, ids=ids, limit=limit,
             ).data()
         return [{"name": r["name"], "deg": r["deg"]} for r in rows]
     except Exception:
@@ -380,8 +398,11 @@ def _match_chunks(doc_id: str, name: str, limit: int = 3) -> list[dict]:
     return hits
 
 
-def entity_detail(name: str) -> dict | None:
-    """实体节点详情：关联文档列表 + 每份文档中命中该实体的原文片段（页码溯源）。"""
+def entity_detail(name: str, visible: set[str] | None = None) -> dict | None:
+    """实体节点详情：关联文档列表 + 每份文档中命中该实体的原文片段（页码溯源）。
+
+    visible: 仅返回当前用户可见的文档；全部不可见时返回 None。
+    """
     if not available():
         return None
     try:
@@ -395,6 +416,10 @@ def entity_detail(name: str) -> dict | None:
                 """,
                 name=name,
             ).data()
+        if visible is not None:
+            docs = [d for d in docs if d["doc_id"] in visible]
+        if not docs:
+            return None
         for d in docs:
             d["matches"] = _match_chunks(d["doc_id"], name)
         return {"name": name, "doc_count": len(docs), "docs": docs}

@@ -6,8 +6,8 @@ import {
   deleteDocument,
   deleteFolder,
   fetchAcl,
-  fetchAdminUsers,
   fetchDocuments,
+  fetchUserDirectory,
   fetchFolders,
   saveAcl,
   uploadDocuments,
@@ -123,7 +123,7 @@ function DocRow({ d, user, onOpen, onRemove, onAcl, delay }) {
             创建者 {d.owner}
           </span>
         )}
-        {user?.role === 'admin' && (
+        {(user?.role === 'admin' || (d.owner && d.owner === user?.username)) && (
           <button
             onClick={() => onAcl?.({ type: 'doc', id: d.doc_id, name: d.name, owner: d.owner })}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white/20 transition-all duration-500 ease-fluid hover:bg-aura/10 hover:text-aura active:scale-90"
@@ -154,7 +154,122 @@ function DocRow({ d, user, onOpen, onRemove, onAcl, delay }) {
   )
 }
 
-/* ---------------- 成员权限弹窗（管理员） ---------------- */
+/* ---------------- 暗色下拉（原生 select 的弹层是系统样式，无法跟随暗色主题） ---------------- */
+
+function Dropdown({ value, options, onChange, placeholder = '请选择', className = '' }) {
+  const [open, setOpen] = useState(false)
+  const [rect, setRect] = useState(null)
+  const btnRef = useRef(null)
+
+  useEffect(() => {
+    if (!open) return
+    const close = () => setOpen(false)
+    const onDown = (e) => {
+      if (btnRef.current?.contains(e.target)) return
+      if (e.target.closest?.('[data-role="dropdown-panel"]')) return
+      close()
+    }
+    document.addEventListener('mousedown', onDown)
+    window.addEventListener('resize', close)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [open])
+
+  const toggle = () => {
+    if (!open && btnRef.current) setRect(btnRef.current.getBoundingClientRect())
+    setOpen((o) => !o)
+  }
+
+  const current = options.find((o) => o.value === value)
+
+  return (
+    <div className={`relative ${className}`}>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={toggle}
+        className="flex w-full items-center justify-between gap-2 rounded-xl bg-white/[0.05] px-3 py-2 text-left text-[13px] text-white/75 ring-1 ring-inset ring-white/[0.08] transition-colors duration-300 hover:bg-white/[0.08]"
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <span className="truncate">{current?.label ?? placeholder}</span>
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          className={`shrink-0 text-white/35 transition-transform duration-300 ${open ? 'rotate-180' : ''}`}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M2 4l3 3 3-3" />
+        </svg>
+      </button>
+      {open &&
+        rect &&
+        createPortal(
+          <div
+            data-role="dropdown-panel"
+            className="fixed z-[120] max-h-56 overflow-y-auto rounded-xl bg-[#141416] p-1 shadow-[0_16px_48px_-12px_rgba(0,0,0,0.9)] ring-1 ring-white/10"
+            style={{ top: rect.bottom + 6, left: rect.left, width: rect.width }}
+          >
+            {options.length === 0 && <p className="px-3 py-2 text-[12px] text-white/30">暂无可选项</p>}
+            {options.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => {
+                  onChange(o.value)
+                  setOpen(false)
+                }}
+                className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-[13px] transition-colors duration-200 ${
+                  o.value === value ? 'bg-aura/15 text-aura' : 'text-white/70 hover:bg-white/[0.06] hover:text-white'
+                }`}
+              >
+                <span className="min-w-0 flex-1 truncate">{o.label}</span>
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
+    </div>
+  )
+}
+
+/* 角色切换胶囊：可查看 / 可编辑 */
+function RolePills({ value, onChange }) {
+  return (
+    <div className="flex shrink-0 rounded-full bg-white/[0.05] p-0.5 ring-1 ring-inset ring-white/[0.07]">
+      {[
+        { v: 'viewer', label: '可查看' },
+        { v: 'editor', label: '可编辑' },
+      ].map((o) => (
+        <button
+          key={o.v}
+          type="button"
+          onClick={() => onChange(o.v)}
+          className={`rounded-full px-2.5 py-1 text-[11px] font-medium transition-all duration-300 ${
+            value === o.v
+              ? o.v === 'editor'
+                ? 'bg-ember/15 text-ember ring-1 ring-inset ring-ember/25'
+                : 'bg-white/[0.14] text-white ring-1 ring-inset ring-white/[0.1]'
+              : 'text-white/35 hover:text-white/70'
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+/* ---------------- 成员权限弹窗（管理员 / 资源创建者） ---------------- */
 
 function AclDialog({ target, onClose, onSaved }) {
   const [access, setAccess] = useState('open')
@@ -168,7 +283,7 @@ function AclDialog({ target, onClose, onSaved }) {
 
   useEffect(() => {
     let alive = true
-    Promise.all([fetchAcl(target.type, target.id), fetchAdminUsers().catch(() => [])])
+    Promise.all([fetchAcl(target.type, target.id), fetchUserDirectory().catch(() => [])])
       .then(([acl, list]) => {
         if (!alive) return
         setAccess(acl.access || 'open')
@@ -226,7 +341,9 @@ function AclDialog({ target, onClose, onSaved }) {
             <p className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.22em] text-white/35">
               <IconShield size={13} /> 成员权限
             </p>
-            <h3 className="mt-2 truncate text-[16px] font-semibold text-white/90">{target.name || '未命名'}</h3>
+            <h3 className="mt-2 truncate text-[16px] font-semibold text-white/90" title={target.name}>
+              {target.name || '未命名'}
+            </h3>
             <p className="mt-1 truncate text-[12px] text-white/35">
               {target.type === 'folder' ? '文件夹' : '文档'} · 创建者 {target.owner || '未知'}
             </p>
@@ -275,19 +392,18 @@ function AclDialog({ target, onClose, onSaved }) {
               {members.map((m) => (
                 <div
                   key={m.username}
-                  className="flex items-center gap-2 rounded-xl bg-white/[0.04] px-3 py-2 ring-1 ring-inset ring-white/[0.06]"
+                  className="flex items-center gap-2.5 rounded-xl bg-white/[0.04] px-3 py-2 ring-1 ring-inset ring-white/[0.06]"
                 >
-                  <span className="min-w-0 flex-1 truncate text-[13px] text-white/75">{m.username}</span>
-                  <select
+                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-aura/25 to-ember/20 text-[10px] font-semibold uppercase text-white/75">
+                    {m.username.slice(0, 1)}
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-[13px] text-white/80">{m.username}</span>
+                  <RolePills
                     value={m.role}
-                    onChange={(e) =>
-                      setMembers((ms) => ms.map((x) => (x.username === m.username ? { ...x, role: e.target.value } : x)))
+                    onChange={(v) =>
+                      setMembers((ms) => ms.map((x) => (x.username === m.username ? { ...x, role: v } : x)))
                     }
-                    className="rounded-lg bg-white/[0.06] px-2 py-1 text-[12px] text-white/70 outline-none"
-                  >
-                    <option value="viewer">可查看</option>
-                    <option value="editor">可编辑</option>
-                  </select>
+                  />
                   <button
                     onClick={() => setMembers((ms) => ms.filter((x) => x.username !== m.username))}
                     className="flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition-colors duration-300 hover:bg-red-400/10 hover:text-red-300"
@@ -300,37 +416,28 @@ function AclDialog({ target, onClose, onSaved }) {
             </div>
           </div>
 
-          <div className="flex items-end gap-2">
-            <label className="min-w-0 flex-1">
-              <span className="mb-1.5 block text-[12px] text-white/45">添加成员</span>
-              <select
+          <div>
+            <p className="mb-2 flex items-center justify-between gap-3 text-[12px] text-white/45">
+              添加成员
+              <span className="text-[11px] text-white/25">来自系统已注册用户</span>
+            </p>
+            <div className="flex items-center gap-2">
+              <Dropdown
+                className="min-w-0 flex-1"
                 value={pick}
-                onChange={(e) => setPick(e.target.value)}
-                className="w-full rounded-xl bg-white/[0.05] px-3 py-2 text-[13px] text-white/70 outline-none ring-1 ring-inset ring-white/[0.08]"
+                onChange={setPick}
+                options={candidates.map((u) => ({ value: u.username, label: u.username }))}
+                placeholder={candidates.length ? '选择用户' : '没有可添加的用户'}
+              />
+              <RolePills value={role} onChange={setRole} />
+              <button
+                onClick={addMember}
+                disabled={!pick}
+                className="shrink-0 rounded-xl bg-aura/15 px-3.5 py-2 text-[12px] text-aura ring-1 ring-inset ring-aura/25 transition-colors duration-300 hover:bg-aura/25 disabled:opacity-40"
               >
-                {candidates.length === 0 && <option value="">（没有可添加的用户）</option>}
-                {candidates.map((u) => (
-                  <option key={u.id || u.username} value={u.username}>
-                    {u.username}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <select
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-              className="rounded-xl bg-white/[0.05] px-2 py-2 text-[12px] text-white/70 outline-none ring-1 ring-inset ring-white/[0.08]"
-            >
-              <option value="viewer">可查看</option>
-              <option value="editor">可编辑</option>
-            </select>
-            <button
-              onClick={addMember}
-              disabled={!pick}
-              className="rounded-xl bg-aura/15 px-3 py-2 text-[12px] text-aura ring-1 ring-inset ring-aura/25 transition-colors duration-300 hover:bg-aura/25 disabled:opacity-40"
-            >
-              添加
-            </button>
+                添加
+              </button>
+            </div>
           </div>
           {err && <p className="text-[12px] text-red-300/90">{err}</p>}
         </div>
@@ -796,7 +903,7 @@ export default function KnowledgeView({ user, onStatsChange }) {
                   {currentFolderId ? '新建子文件夹' : '新建文件夹'}
                 </button>
               )}
-              {currentFolder && user?.role === 'admin' && (
+              {currentFolder && (user?.role === 'admin' || (currentFolder.owner && currentFolder.owner === user?.username)) && (
                 <button
                   onClick={() =>
                     setAclTarget({ type: 'folder', id: currentFolder.id, name: currentFolder.name, owner: currentFolder.owner })

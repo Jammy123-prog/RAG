@@ -108,6 +108,7 @@ export default function App() {
         {tab === 'vault' && <KnowledgeView user={user} onStatsChange={() => setStatsVersion((v) => v + 1)} />}
         {tab === 'graph' && (
           <GraphView
+            user={user}
             onAsk={(text) => {
               setPendingAsk(text)
               setTab('chat')

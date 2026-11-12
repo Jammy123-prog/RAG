@@ -68,6 +68,13 @@ export async function logout() {
 
 // ---------------- 成员权限（ACL） ----------------
 
+/** 成员选择用：所有用户名（登录即可，不含其他字段） */
+export async function fetchUserDirectory() {
+  const res = await req('/api/users/directory')
+  if (!res.ok) throw new Error('获取用户列表失败')
+  return res.json()
+}
+
 export async function fetchAcl(resourceType, resourceId) {
   const p = new URLSearchParams({ resource_type: resourceType, resource_id: resourceId })
   const res = await req(`/api/acl?${p}`)

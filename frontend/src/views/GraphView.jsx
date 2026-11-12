@@ -285,7 +285,7 @@ function DocPanel({ node, data, onAsk, onOpenEntity, onOpenDoc, onClose }) {
   )
 }
 
-export default function GraphView({ onAsk }) {
+export default function GraphView({ onAsk, user }) {
   const [data, setData] = useState(null)
   const [mode, setMode] = useState('docs') // docs=文档关联 / full=文档+实体
   const [toast, setToast] = useState(null)
@@ -472,14 +472,17 @@ export default function GraphView({ onAsk }) {
                 ? `构建失败：${status.message}`
                 : '暂无图谱数据'}
         </span>
-        <button
-          onClick={rebuild}
-          disabled={building}
-          className="ml-auto flex items-center gap-2 rounded-full bg-gradient-to-br from-aura to-aura/70 px-5 py-2.5 text-[13px] font-semibold text-white shadow-[0_8px_24px_-8px_rgba(167,139,250,0.55)] transition-all duration-500 ease-fluid hover:shadow-[0_12px_32px_-8px_rgba(167,139,250,0.75)] active:scale-[0.97] disabled:opacity-40 disabled:shadow-none"
-        >
-          <IconGraph size={15} />
-          {building ? '构建中…' : hasGraph ? '重建图谱' : '构建图谱'}
-        </button>
+        {/* 全库重建会消耗 LLM 额度并影响他人查询，仅管理员可见 */}
+        {user?.role === 'admin' && (
+          <button
+            onClick={rebuild}
+            disabled={building}
+            className="ml-auto flex items-center gap-2 rounded-full bg-gradient-to-br from-aura to-aura/70 px-5 py-2.5 text-[13px] font-semibold text-white shadow-[0_8px_24px_-8px_rgba(167,139,250,0.55)] transition-all duration-500 ease-fluid hover:shadow-[0_12px_32px_-8px_rgba(167,139,250,0.75)] active:scale-[0.97] disabled:opacity-40 disabled:shadow-none"
+          >
+            <IconGraph size={15} />
+            {building ? '构建中…' : hasGraph ? '重建图谱' : '构建图谱'}
+          </button>
+        )}
       </div>
 
       {/* 图谱画布（Double-Bezel）+ 详情侧栏 */}
