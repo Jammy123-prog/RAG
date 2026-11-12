@@ -5,6 +5,14 @@ import { IconUpload, IconDoc, IconTrash } from '../components/icons.jsx'
 
 const fmtSize = (b) => (b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`)
 
+const pad2 = (n) => String(n).padStart(2, '0')
+
+/** 时间戳 → 本地 时:分:秒 */
+const fmtClock = (ts) => {
+  const d = new Date(ts)
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
+}
+
 const FolderIcon = ({ size = 18, className = '' }) => (
   <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" className={className}>
     <path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2.5h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -30,7 +38,15 @@ const PlusIcon = ({ size = 13 }) => (
   </svg>
 )
 
-function UploadingCard({ name }) {
+function UploadingCard({ name, startedAt }) {
+  const [elapsed, setElapsed] = useState(0)
+  useEffect(() => {
+    if (!startedAt) return
+    const tick = () => setElapsed(Math.max(0, Math.round((Date.now() - startedAt) / 1000)))
+    tick()
+    const t = setInterval(tick, 1000)
+    return () => clearInterval(t)
+  }, [startedAt])
   return (
     <div className="flex items-center gap-4 rounded-[1.5rem] bg-white/[0.03] p-1.5 ring-1 ring-inset ring-white/[0.06]">
       <div className="flex w-full items-center gap-4 rounded-[calc(1.5rem-0.375rem)] bg-[#0b0b0d] px-5 py-4">
@@ -43,7 +59,12 @@ function UploadingCard({ name }) {
             <div className="h-full w-1/3 animate-[slide_1.2s_cubic-bezier(0.32,0.72,0,1)_infinite] rounded-full bg-gradient-to-r from-aura to-ember" />
           </div>
         </div>
-        <span className="shrink-0 text-[12px] text-white/40">解析 · 切分 · 向量化中</span>
+        <div className="shrink-0 text-right">
+          <p className="text-[12px] text-white/40">解析 · 切分 · 向量化中</p>
+          <p className="mt-0.5 text-[11px] tabular-nums text-white/25">
+            {startedAt ? `${fmtClock(startedAt)} 开始 · 已用时 ${elapsed}s` : '排队中'}
+          </p>
+        </div>
       </div>
     </div>
   )
@@ -281,11 +302,17 @@ export default function KnowledgeView({ user, onStatsChange }) {
     const files = [...fileList]
     if (!files.length) return
     const target = currentFolderId || ''
+    const startedAt = Date.now()
+    setUploadStartedAt(startedAt)
     setUploading(files.map((f) => f.name))
     try {
       const res = await uploadDocuments(files, scope, target)
       if (res.success?.length) {
-        setToast({ ok: true, text: `已入库 ${res.success.length} 份文档，共 ${res.success.reduce((a, d) => a + d.chunks, 0)} 个知识分片` })
+        const seconds = ((Date.now() - startedAt) / 1000).toFixed(1)
+        setToast({
+          ok: true,
+          text: `已入库 ${res.success.length} 份文档，共 ${res.success.reduce((a, d) => a + d.chunks, 0)} 个知识分片 · ${fmtClock(startedAt)} 上传 · 耗时 ${seconds}s`,
+        })
       }
       if (res.errors?.length) {
         setToast({ ok: false, text: res.errors.map((e) => `${e.name}：${e.error}`).join('；') })
@@ -334,7 +361,6 @@ export default function KnowledgeView({ user, onStatsChange }) {
   }
 
   const removeFolder = async (f) => {
-    if (!window.confirm(`删除文件夹「${f.name}」及其所有子文件夹？其中的文档会移到上一级，不会被删除。`)) return
     try {
       await deleteFolder(f.id)
       const parent = f.parent_id ? { type: 'folder', id: f.parent_id } : { type: 'root' }
@@ -650,7 +676,7 @@ export default function KnowledgeView({ user, onStatsChange }) {
           {uploading.length > 0 && (
             <div className="mt-4 grid gap-3">
               {uploading.map((n) => (
-                <UploadingCard key={n} name={n} />
+                <UploadingCard key={n} name={n} startedAt={uploadStartedAt} />
               ))}
             </div>
           )}

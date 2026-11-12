@@ -20,7 +20,6 @@ export default function UsersView({ me }) {
   }, [refresh])
 
   const remove = async (u) => {
-    if (!window.confirm(`删除用户「${u.username}」？其全部会话记录将一并清除。`)) return
     try {
       await deleteAdminUser(u.id)
       refresh()

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import DocumentPreview from '../components/DocumentPreview.jsx'
-import { deleteConversation, fetchMessages, listConversations, streamChat } from '../lib/api'
+import { deleteConversation, fetchDocuments, fetchMessages, listConversations, streamChat } from '../lib/api'
 import { consumePendingAsk } from '../lib/askBus'
 import { IconSend, IconSpark, IconQuote, IconChat, IconTrash, IconList } from '../components/icons.jsx'
 
@@ -176,12 +176,43 @@ function Lightbox({ url, onClose }) {
   )
 }
 
-const SUGGESTIONS = [
-  '公司年假政策是怎样的？',
-  '报销流程需要哪些单据？',
-  '新员工入职第一周要做什么？',
-  '信息安全有哪些红线要求？',
+/* ---------------- 空对话页的建议提问（按知识库里的真实文档生成） ---------------- */
+
+const FALLBACK_SUGGESTIONS = [
+  '当前知识库里有哪些核心资料？',
+  '请按主题总结一下知识库的内容',
+  '这些文档之间有哪些关联？',
+  '最近入库的文档讲了什么？',
 ]
+
+const ASK_TEMPLATES = [
+  (n) => `请总结《${n}》的核心内容`,
+  (n) => `《${n}》里有哪些关键流程或步骤？`,
+  (n) => `《${n}》定义了哪些接口、参数或字段？`,
+  (n) => `《${n}》有哪些结论与待办事项？`,
+]
+
+/** 去掉上传时加的 hash 前缀、扩展名与下划线，过长时按词边界截断 */
+const cleanDocName = (name) => {
+  const base = String(name || '')
+    .replace(/\.[^.]+$/, '')
+    .replace(/^[0-9a-f]{6,}[_-][0-9a-f]{6,}[_-]/i, '')
+    .replace(/[_-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (base.length <= 28) return base
+  const cut = base.slice(0, 28)
+  const lastSpace = cut.lastIndexOf(' ')
+  return `${(lastSpace > 12 ? cut.slice(0, lastSpace) : cut).trim()}…`
+}
+
+const buildSuggestions = (docs) =>
+  docs
+    .map((d, i) => {
+      const name = cleanDocName(d?.name)
+      return name ? ASK_TEMPLATES[i % ASK_TEMPLATES.length](name) : ''
+    })
+    .filter(Boolean)
 
 function AnswerBody({ text, streaming }) {
   const parts = text.split(/(\[\d{1,2}\])/g)
@@ -358,6 +389,7 @@ export default function ChatView() {
   const [askHistory, setAskHistory] = useState(loadAskHistory)
   const [historyOpen, setHistoryOpen] = useState(false)
   const [flash, setFlash] = useState(null) // 定位后短暂高亮某条提问 { index, seq }
+  const [suggestions, setSuggestions] = useState(FALLBACK_SUGGESTIONS)
   const endRef = useRef(null)
   const inputRef = useRef(null)
   const historyRef = useRef(null)
@@ -375,6 +407,23 @@ export default function ChatView() {
   useEffect(() => {
     refreshConversations()
   }, [refreshConversations])
+
+  // 建议提问：取知识库最近 4 份文档生成，拿不到时保留兜底问题
+  useEffect(() => {
+    let alive = true
+    fetchDocuments()
+      .then((list) => {
+        if (!alive || !Array.isArray(list) || list.length === 0) return
+        const built = buildSuggestions(list.slice(0, 4))
+        if (built.length) setSuggestions(built)
+      })
+      .catch(() => {
+        /* 未登录或后端未启动时用兜底问题 */
+      })
+    return () => {
+      alive = false
+    }
+  }, [])
 
   // 图谱页「一键提问」跳转过来时自动发送（挂载时消费一次）
   useEffect(() => {
@@ -521,9 +570,12 @@ export default function ChatView() {
     setDrawerOpen(false)
   }
 
-  const removeConversation = async (cid, title) => {
-    if (!window.confirm(`删除会话「${title}」？该操作不可恢复。`)) return
-    await deleteConversation(cid)
+  const removeConversation = async (cid) => {
+    try {
+      await deleteConversation(cid)
+    } catch {
+      return
+    }
     // 同步清掉该会话的历史提问，避免留下点不进去的条目
     setAskHistory((prev) => {
       const next = prev.filter((i) => i.cid !== cid)
@@ -624,7 +676,7 @@ export default function ChatView() {
             <button
               onClick={(e) => {
                 e.stopPropagation()
-                removeConversation(c.id, c.title)
+                removeConversation(c.id)
               }}
               className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-white/0 transition-all duration-500 ease-fluid group-hover:text-white/30 hover:!text-red-300 active:scale-90"
               aria-label="删除会话"
@@ -673,7 +725,7 @@ export default function ChatView() {
         </div>
 
         {messages.length === 0 ? (
-          <div className="flex flex-col items-center py-12 text-center md:py-20">
+          <div className="flex flex-col items-center pb-48 pt-12 text-center md:pt-20">
             <span className="animate-reveal rounded-full bg-white/[0.04] px-3.5 py-1.5 text-[10px] font-medium uppercase tracking-[0.25em] text-white/50 ring-1 ring-inset ring-white/[0.08]">
               RAG · RETRIEVAL AUGMENTED
             </span>
@@ -687,14 +739,15 @@ export default function ChatView() {
               基于 Qwen3-14B 与 bge-m3 的私有化检索增强问答，每个答案均可溯源、流式输出。
             </p>
             <div className="mt-12 grid w-full max-w-xl animate-reveal grid-cols-1 gap-3 [animation-delay:300ms] sm:grid-cols-2">
-              {SUGGESTIONS.map((s, i) => (
+              {suggestions.map((s, i) => (
                 <button
-                  key={i}
+                  key={`${i}-${s}`}
                   onClick={() => send(s)}
-                  className="group rounded-[1.5rem] bg-white/[0.03] p-1.5 text-left ring-1 ring-inset ring-white/[0.06] transition-all duration-700 ease-fluid hover:bg-white/[0.05] hover:ring-white/[0.12] active:scale-[0.98]"
+                  title={s}
+                  className="group flex rounded-[1.5rem] bg-white/[0.03] p-1.5 text-left ring-1 ring-inset ring-white/[0.06] transition-all duration-700 ease-fluid hover:bg-white/[0.05] hover:ring-white/[0.12] active:scale-[0.98]"
                 >
-                  <div className="rounded-[calc(1.5rem-0.375rem)] px-5 py-4">
-                    <span className="text-[14px] text-white/65 transition-colors duration-500 group-hover:text-white/95">{s}</span>
+                  <div className="flex w-full items-center rounded-[calc(1.5rem-0.375rem)] px-5 py-4">
+                    <span className="line-clamp-2 text-[14px] leading-relaxed text-white/65 transition-colors duration-500 group-hover:text-white/95">{s}</span>
                   </div>
                 </button>
               ))}
@@ -736,9 +789,9 @@ export default function ChatView() {
       {lightbox && <Lightbox url={lightbox} onClose={() => setLightbox(null)} />}
       {preview && <DocumentPreview doc={preview} onClose={() => setPreview(null)} />}
 
-      {/* 输入区：双层边框 + 按钮嵌套按钮 */}
-      <div className="fixed inset-x-0 bottom-0 z-30 bg-gradient-to-t from-void via-void/85 to-transparent pb-6 pt-10 backdrop-blur-xl">
-        <div className="mx-auto w-full max-w-3xl px-4 md:max-w-[42rem]">
+      {/* 输入区：双层边框 + 按钮嵌套按钮（fixed 定位需补偿侧边栏宽度，才能与消息区同轴居中） */}
+      <div className="fixed inset-x-0 bottom-0 z-30 bg-gradient-to-t from-void via-void/85 to-transparent pb-6 pt-10 backdrop-blur-xl md:pl-72 lg:pl-80">
+        <div className="mx-auto w-full max-w-3xl px-4">
           <div
             ref={historyRef}
             className="relative rounded-[2rem] bg-white/[0.05] p-1.5 ring-1 ring-white/[0.09] transition-all duration-700 ease-fluid focus-within:ring-aura/40"
