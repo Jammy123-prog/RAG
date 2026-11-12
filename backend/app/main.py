@@ -495,8 +495,17 @@ async def delete_document(doc_id: str, user: dict = Depends(get_user)):
 
 
 class AclMember(BaseModel):
-    username: str
+    """授权对象：用户（subject_type=user，subject=用户名）或团队（team，subject=团队 id）。"""
+
+    subject_type: str = "user"  # user | team
+    subject: str = ""  # 用户名 / 团队 id
     role: str = "viewer"
+    username: str = ""  # 兼容旧客户端（等同 subject）
+
+
+class TeamForm(BaseModel):
+    name: str
+    members: list[str] = []
 
 
 class AclForm(BaseModel):
@@ -520,6 +529,67 @@ async def users_directory(user: dict = Depends(get_user)):
     return [{"username": u["username"]} for u in store.list_users()]
 
 
+# ==================== 团队（管理员建组，权限可整体授予团队） ====================
+
+
+def _clean_team_members(members: list[str], valid: set[str]) -> list[str]:
+    out: list[str] = []
+    for m in members:
+        name = (m or "").strip()
+        if not name:
+            continue
+        if name not in valid:
+            raise HTTPException(400, f"用户「{name}」不存在")
+        if name not in out:
+            out.append(name)
+    return out
+
+
+@app.get("/api/teams")
+async def list_teams(user: dict = Depends(get_user)):
+    """团队列表（登录即可见，便于权限弹窗按团队授权）。"""
+    return store.list_teams()
+
+
+@app.post("/api/teams")
+async def create_team(form: TeamForm, user: dict = Depends(get_user)):
+    """新建团队并指定成员（仅管理员）。"""
+    require_admin(user)
+    name = form.name.strip()
+    if not name:
+        raise HTTPException(400, "团队名称不能为空")
+    if store.get_team_by_name(name):
+        raise HTTPException(400, f"团队「{name}」已存在")
+    valid = {u["username"] for u in store.list_users()}
+    return store.create_team(name, _clean_team_members(form.members, valid))
+
+
+@app.put("/api/teams/{team_id}")
+async def update_team(team_id: str, form: TeamForm, user: dict = Depends(get_user)):
+    """改名 + 覆盖式更新成员（仅管理员）。"""
+    require_admin(user)
+    name = form.name.strip()
+    if not name:
+        raise HTTPException(400, "团队名称不能为空")
+    other = store.get_team_by_name(name)
+    if other and other["id"] != team_id:
+        raise HTTPException(400, f"团队「{name}」已存在")
+    valid = {u["username"] for u in store.list_users()}
+    team = store.update_team(team_id, name, _clean_team_members(form.members, valid))
+    if not team:
+        raise HTTPException(404, "团队不存在")
+    return team
+
+
+@app.delete("/api/teams/{team_id}")
+async def delete_team(team_id: str, user: dict = Depends(get_user)):
+    """删除团队，同时清理该团队的全部授权（仅管理员）。"""
+    require_admin(user)
+    if not store.delete_team(team_id):
+        raise HTTPException(404, "团队不存在")
+    return {"ok": True}
+
+
 def _require_acl_manager(user: dict, info: dict) -> None:
     """成员权限的配置人：管理员，或该资源的创建者（WPS 里「我分享」的语义）。"""
     if user.get("role") == "admin" or info.get("owner") == user.get("username"):
@@ -534,19 +604,29 @@ async def get_acl(resource_type: str, resource_id: str, user: dict = Depends(get
     if not info:
         raise HTTPException(404, "资源不存在")
     _require_acl_manager(user, info)
+    teams = {t["id"]: t for t in store.list_teams()}
+    members = []
+    for m in store.list_acl(resource_type, resource_id):
+        st = m.get("subject_type") or "user"
+        row = {"subject_type": st, "subject": m["subject"], "role": m["role"]}
+        if st == "team":
+            team = teams.get(m["subject"])
+            row["team_name"] = team["name"] if team else "（已删除团队）"
+            row["team_size"] = len(team["members"]) if team else 0
+        members.append(row)
     return {
         "resource_type": resource_type,
         "resource_id": resource_id,
         "name": info.get("name"),
         "owner": info.get("owner"),
         "access": info.get("access") or "open",
-        "members": store.list_acl(resource_type, resource_id),
+        "members": members,
     }
 
 
 @app.put("/api/acl")
 async def put_acl(form: AclForm, user: dict = Depends(get_user)):
-    """覆盖式保存成员权限（管理员或资源创建者）：可见范围 + 成员角色。"""
+    """覆盖式保存成员权限（管理员或资源创建者）：可见范围 + 成员/团队角色。"""
     if form.resource_type not in ("folder", "doc"):
         raise HTTPException(400, "resource_type 仅支持 folder / doc")
     if form.access not in ("open", "restricted"):
@@ -556,19 +636,27 @@ async def put_acl(form: AclForm, user: dict = Depends(get_user)):
         raise HTTPException(404, "资源不存在")
     _require_acl_manager(user, info)
 
-    valid = {u["username"] for u in store.list_users()}
-    seen: set[str] = set()
+    valid_users = {u["username"] for u in store.list_users()}
+    valid_teams = {t["id"] for t in store.list_teams()}
+    seen: set[tuple[str, str]] = set()
     members = []
     for m in form.members:
-        name = m.username.strip()
-        if name not in valid:
-            raise HTTPException(400, f"用户「{name}」不存在")
+        st = (m.subject_type or "user").strip()
+        if st not in ("user", "team"):
+            raise HTTPException(400, "subject_type 仅支持 user / team")
+        subject = (m.subject or m.username or "").strip()
+        if not subject:
+            continue
         if m.role not in perms.ROLES:
             raise HTTPException(400, "角色仅支持 viewer / editor")
-        if not name or name in seen:
+        if st == "user" and subject not in valid_users:
+            raise HTTPException(400, f"用户「{subject}」不存在")
+        if st == "team" and subject not in valid_teams:
+            raise HTTPException(400, "团队不存在")
+        if (st, subject) in seen:
             continue
-        seen.add(name)
-        members.append({"username": name, "role": m.role})
+        seen.add((st, subject))
+        members.append({"subject_type": st, "subject": subject, "role": m.role})
 
     if form.resource_type == "folder":
         vectorstore.set_folder_access(form.resource_id, form.access)

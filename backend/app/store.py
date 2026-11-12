@@ -45,15 +45,29 @@ CREATE TABLE IF NOT EXISTS revoked_tokens (
     exp         INTEGER NOT NULL
 );
 -- 资源成员权限：resource_type = folder | doc，role = viewer | editor
+-- subject_type = user | team；用户主体时 subject 为 username，团队主体时为团队 id
 CREATE TABLE IF NOT EXISTS acl (
     resource_type TEXT NOT NULL,
     resource_id   TEXT NOT NULL,
     username      TEXT NOT NULL,
     role          TEXT NOT NULL,
     created_at    TEXT NOT NULL,
-    PRIMARY KEY (resource_type, resource_id, username)
+    subject_type  TEXT NOT NULL DEFAULT 'user',
+    PRIMARY KEY (resource_type, resource_id, subject_type, username)
 );
 CREATE INDEX IF NOT EXISTS idx_acl_user ON acl(username);
+-- 团队：管理员建组并加成员，权限可整体授予团队
+CREATE TABLE IF NOT EXISTS teams (
+    id         TEXT PRIMARY KEY,
+    name       TEXT UNIQUE NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS team_members (
+    team_id    TEXT NOT NULL,
+    username   TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (team_id, username)
+);
 """
 
 
@@ -66,6 +80,10 @@ def _conn() -> sqlite3.Connection:
 def init_db() -> None:
     with _conn() as c:
         c.executescript(_SCHEMA)
+        # 迁移：老库的 acl 表没有 subject_type 列（团队权限），补齐后主体默认是用户
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(acl)").fetchall()}
+        if "subject_type" not in cols:
+            c.execute("ALTER TABLE acl ADD COLUMN subject_type TEXT NOT NULL DEFAULT 'user'")
 
 
 def _now() -> str:
@@ -117,6 +135,8 @@ def list_users() -> list[dict]:
 
 def delete_user(uid: int) -> bool:
     with _conn() as c:
+        row = c.execute("SELECT username FROM users WHERE id=?", (uid,)).fetchone()
+        name = row["username"] if row else ""
         cur = c.execute("DELETE FROM users WHERE id=?", (uid,))
     # 级联清理该用户的全部会话与消息
     with _conn() as c:
@@ -124,6 +144,10 @@ def delete_user(uid: int) -> bool:
         for r in convs:
             c.execute("DELETE FROM messages WHERE conv_id=?", (r["id"],))
         c.execute("DELETE FROM conversations WHERE user_id=?", (uid,))
+        # 同时移出团队、清理其个人授权，避免悬空成员
+        if name:
+            c.execute("DELETE FROM team_members WHERE username=?", (name,))
+            c.execute("DELETE FROM acl WHERE subject_type='user' AND username=?", (name,))
     return cur.rowcount > 0
 
 
@@ -227,7 +251,8 @@ def is_token_revoked(jti: str) -> bool:
 def list_acl(resource_type: str, resource_id: str) -> list[dict]:
     with _conn() as c:
         rows = c.execute(
-            "SELECT username, role, created_at FROM acl WHERE resource_type=? AND resource_id=? ORDER BY created_at",
+            "SELECT subject_type, username AS subject, role, created_at FROM acl"
+            " WHERE resource_type=? AND resource_id=? ORDER BY created_at",
             (resource_type, resource_id),
         ).fetchall()
     return [dict(r) for r in rows]
@@ -236,37 +261,106 @@ def list_acl(resource_type: str, resource_id: str) -> list[dict]:
 def all_acl() -> list[dict]:
     """一次性取全量，供权限判定在内存中做继承计算。"""
     with _conn() as c:
-        rows = c.execute("SELECT resource_type, resource_id, username, role FROM acl").fetchall()
+        rows = c.execute("SELECT resource_type, resource_id, subject_type, username, role FROM acl").fetchall()
     return [dict(r) for r in rows]
 
 
-def set_acl(resource_type: str, resource_id: str, username: str, role: str) -> None:
+def set_acl(resource_type: str, resource_id: str, subject: str, role: str, subject_type: str = "user") -> None:
     with _conn() as c:
         c.execute(
-            "INSERT OR REPLACE INTO acl (resource_type, resource_id, username, role, created_at) VALUES (?,?,?,?,?)",
-            (resource_type, resource_id, username, role, _now()),
+            "INSERT OR REPLACE INTO acl (resource_type, resource_id, subject_type, username, role, created_at)"
+            " VALUES (?,?,?,?,?,?)",
+            (resource_type, resource_id, subject_type, subject, role, _now()),
         )
 
 
-def remove_acl(resource_type: str, resource_id: str, username: str) -> None:
+def remove_acl(resource_type: str, resource_id: str, subject: str, subject_type: str = "user") -> None:
     with _conn() as c:
         c.execute(
-            "DELETE FROM acl WHERE resource_type=? AND resource_id=? AND username=?",
-            (resource_type, resource_id, username),
+            "DELETE FROM acl WHERE resource_type=? AND resource_id=? AND subject_type=? AND username=?",
+            (resource_type, resource_id, subject_type, subject),
         )
 
 
 def replace_acl(resource_type: str, resource_id: str, members: list[dict]) -> None:
-    """整体覆盖某资源的成员列表（先清空再写入）。"""
+    """整体覆盖某资源的成员列表（先清空再写入）。members: [{subject, subject_type, role}]"""
     with _conn() as c:
         c.execute("DELETE FROM acl WHERE resource_type=? AND resource_id=?", (resource_type, resource_id))
         for m in members:
             c.execute(
-                "INSERT OR REPLACE INTO acl (resource_type, resource_id, username, role, created_at) VALUES (?,?,?,?,?)",
-                (resource_type, resource_id, m["username"], m["role"], _now()),
+                "INSERT OR REPLACE INTO acl (resource_type, resource_id, subject_type, username, role, created_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (resource_type, resource_id, m.get("subject_type") or "user", m["subject"], m["role"], _now()),
             )
 
 
 def delete_acl_for(resource_type: str, resource_id: str) -> None:
     with _conn() as c:
         c.execute("DELETE FROM acl WHERE resource_type=? AND resource_id=?", (resource_type, resource_id))
+
+
+# ---------------- 团队 ----------------
+# 团队只做「成员打包」，不直接持有资源；资源权限仍记录在 acl 表里（subject_type='team'）
+
+
+def list_teams() -> list[dict]:
+    with _conn() as c:
+        rows = c.execute("SELECT id, name, created_at FROM teams ORDER BY created_at").fetchall()
+        out = [dict(r) for r in rows]
+        for t in out:
+            t["members"] = [
+                r["username"]
+                for r in c.execute(
+                    "SELECT username FROM team_members WHERE team_id=? ORDER BY created_at", (t["id"],)
+                ).fetchall()
+            ]
+    return out
+
+
+def get_team(team_id: str) -> dict | None:
+    return next((t for t in list_teams() if t["id"] == team_id), None)
+
+
+def get_team_by_name(name: str) -> dict | None:
+    return next((t for t in list_teams() if t["name"] == name), None)
+
+
+def team_ids_of(username: str) -> set[str]:
+    """某用户所属的全部团队 id（权限判定用）。"""
+    with _conn() as c:
+        rows = c.execute("SELECT team_id FROM team_members WHERE username=?", (username,)).fetchall()
+    return {r["team_id"] for r in rows}
+
+
+def create_team(name: str, members: list[str]) -> dict:
+    tid = uuid.uuid4().hex[:8]
+    with _conn() as c:
+        c.execute("INSERT INTO teams (id, name, created_at) VALUES (?,?,?)", (tid, name, _now()))
+        for m in members:
+            c.execute("INSERT OR IGNORE INTO team_members (team_id, username, created_at) VALUES (?,?,?)", (tid, m, _now()))
+    return get_team(tid) or {}
+
+
+def update_team(team_id: str, name: str, members: list[str]) -> dict | None:
+    """改名 + 覆盖式更新成员。"""
+    with _conn() as c:
+        row = c.execute("SELECT 1 FROM teams WHERE id=?", (team_id,)).fetchone()
+        if not row:
+            return None
+        c.execute("UPDATE teams SET name=? WHERE id=?", (name, team_id))
+        c.execute("DELETE FROM team_members WHERE team_id=?", (team_id,))
+        for m in members:
+            c.execute("INSERT OR IGNORE INTO team_members (team_id, username, created_at) VALUES (?,?,?)", (team_id, m, _now()))
+    return get_team(team_id)
+
+
+def delete_team(team_id: str) -> bool:
+    with _conn() as c:
+        row = c.execute("SELECT 1 FROM teams WHERE id=?", (team_id,)).fetchone()
+        if not row:
+            return False
+        c.execute("DELETE FROM team_members WHERE team_id=?", (team_id,))
+        c.execute("DELETE FROM teams WHERE id=?", (team_id,))
+        # 团队消失后，沿用该团队 id 的授权一并清理，避免悬空权限
+        c.execute("DELETE FROM acl WHERE subject_type='team' AND username=?", (team_id,))
+    return True

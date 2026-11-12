@@ -9,6 +9,7 @@ import {
   fetchDocuments,
   fetchUserDirectory,
   fetchFolders,
+  fetchTeams,
   saveAcl,
   uploadDocuments,
 } from '../lib/api'
@@ -273,9 +274,12 @@ function RolePills({ value, onChange }) {
 
 function AclDialog({ target, onClose, onSaved }) {
   const [access, setAccess] = useState('open')
-  const [members, setMembers] = useState([])
+  const [members, setMembers] = useState([]) // {subject_type, subject, role, team_name?, team_size?}
   const [users, setUsers] = useState([])
-  const [pick, setPick] = useState('')
+  const [teams, setTeams] = useState([])
+  const [subjectType, setSubjectType] = useState('user') // user | team
+  const [pickUser, setPickUser] = useState('')
+  const [pickTeam, setPickTeam] = useState('')
   const [role, setRole] = useState('viewer')
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
@@ -283,14 +287,17 @@ function AclDialog({ target, onClose, onSaved }) {
 
   useEffect(() => {
     let alive = true
-    Promise.all([fetchAcl(target.type, target.id), fetchUserDirectory().catch(() => [])])
-      .then(([acl, list]) => {
+    Promise.all([fetchAcl(target.type, target.id), fetchUserDirectory().catch(() => []), fetchTeams().catch(() => [])])
+      .then(([acl, list, teamList]) => {
         if (!alive) return
         setAccess(acl.access || 'open')
         setMembers(acl.members || [])
         const arr = Array.isArray(list) ? list : []
         setUsers(arr)
-        setPick(arr[0]?.username || '')
+        setPickUser(arr[0]?.username || '')
+        const ts = Array.isArray(teamList) ? teamList : []
+        setTeams(ts)
+        setPickTeam(ts[0]?.id || '')
       })
       .catch((e) => alive && setErr(e.message))
       .finally(() => alive && setLoading(false))
@@ -299,12 +306,30 @@ function AclDialog({ target, onClose, onSaved }) {
     }
   }, [target.id, target.type])
 
-  const candidates = users.filter((u) => !members.some((m) => m.username === u.username))
+  const teamById = (id) => teams.find((t) => t.id === id)
+  const candidates = users.filter((u) => !members.some((m) => m.subject_type === 'user' && m.subject === u.username))
+  const teamCandidates = teams.filter((t) => !members.some((m) => m.subject_type === 'team' && m.subject === t.id))
 
   const addMember = () => {
-    if (!pick) return
-    setMembers((ms) => (ms.some((m) => m.username === pick) ? ms : [...ms, { username: pick, role }]))
+    if (subjectType === 'team') {
+      const t = teamById(pickTeam)
+      if (!t) return
+      setMembers((ms) =>
+        ms.some((m) => m.subject_type === 'team' && m.subject === t.id)
+          ? ms
+          : [...ms, { subject_type: 'team', subject: t.id, role, team_name: t.name, team_size: t.members?.length || 0 }],
+      )
+      return
+    }
+    if (!pickUser) return
+    setMembers((ms) =>
+      ms.some((m) => m.subject_type === 'user' && m.subject === pickUser)
+        ? ms
+        : [...ms, { subject_type: 'user', subject: pickUser, role }],
+    )
   }
+
+  const keyOf = (m) => `${m.subject_type}:${m.subject}`
 
   const save = async () => {
     setBusy(true)
@@ -314,7 +339,7 @@ function AclDialog({ target, onClose, onSaved }) {
         resourceType: target.type,
         resourceId: target.id,
         access,
-        members: members.map((m) => ({ username: m.username, role: m.role })),
+        members: members.map((m) => ({ subject_type: m.subject_type, subject: m.subject, role: m.role })),
       })
       onSaved?.()
       onClose()
@@ -379,7 +404,8 @@ function AclDialog({ target, onClose, onSaved }) {
               ))}
             </div>
             <p className="mt-2 text-[11px] leading-relaxed text-white/25">
-              「仅指定成员」时，仅下方授权的成员可查看；子文件夹与文档默认继承上级设置。
+              「仅指定成员」时，仅下方授权的成员（含团队成员）可查看；文件夹的设置会向下作用于其子文件夹与文档，
+              其中文档默认继承「可查看」，成员角色为 editor 时也继承「可编辑」。
             </p>
           </div>
 
@@ -389,50 +415,102 @@ function AclDialog({ target, onClose, onSaved }) {
               {members.length === 0 && (
                 <p className="rounded-xl bg-white/[0.03] px-3 py-3 text-[12px] text-white/30">还没有单独授权的成员</p>
               )}
-              {members.map((m) => (
-                <div
-                  key={m.username}
-                  className="flex items-center gap-2.5 rounded-xl bg-white/[0.04] px-3 py-2 ring-1 ring-inset ring-white/[0.06]"
-                >
-                  <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-aura/25 to-ember/20 text-[10px] font-semibold uppercase text-white/75">
-                    {m.username.slice(0, 1)}
-                  </span>
-                  <span className="min-w-0 flex-1 truncate text-[13px] text-white/80">{m.username}</span>
-                  <RolePills
-                    value={m.role}
-                    onChange={(v) =>
-                      setMembers((ms) => ms.map((x) => (x.username === m.username ? { ...x, role: v } : x)))
-                    }
-                  />
-                  <button
-                    onClick={() => setMembers((ms) => ms.filter((x) => x.username !== m.username))}
-                    className="flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition-colors duration-300 hover:bg-red-400/10 hover:text-red-300"
-                    aria-label="移除成员"
+              {members.map((m) => {
+                const isTeam = m.subject_type === 'team'
+                const team = isTeam ? teamById(m.subject) : null
+                const label = isTeam ? team?.name || m.team_name || '（已删除团队）' : m.subject || m.username
+                const sub = isTeam ? `${team?.members?.length ?? m.team_size ?? 0} 人：${(team?.members || []).join('、') || '无成员'}` : ''
+                return (
+                  <div
+                    key={keyOf(m)}
+                    className="flex items-center gap-2.5 rounded-xl bg-white/[0.04] px-3 py-2 ring-1 ring-inset ring-white/[0.06]"
                   >
-                    <IconTrash size={13} />
-                  </button>
-                </div>
-              ))}
+                    <span
+                      className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold uppercase text-white/75 ${
+                        isTeam ? 'bg-gradient-to-br from-sky-400/30 to-aura/25' : 'bg-gradient-to-br from-aura/25 to-ember/20'
+                      }`}
+                      title={isTeam ? '团队' : '用户'}
+                    >
+                      {isTeam ? '团' : (label || '?').slice(0, 1)}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex items-center gap-1.5">
+                        <span className="truncate text-[13px] text-white/80">{label}</span>
+                        {isTeam && (
+                          <span className="shrink-0 rounded-full bg-sky-400/10 px-1.5 py-[1px] text-[10px] text-sky-300 ring-1 ring-inset ring-sky-400/25">
+                            团队
+                          </span>
+                        )}
+                      </span>
+                      {sub && <span className="mt-0.5 block truncate text-[11px] text-white/25">{sub}</span>}
+                    </span>
+                    <RolePills
+                      value={m.role}
+                      onChange={(v) => setMembers((ms) => ms.map((x) => (keyOf(x) === keyOf(m) ? { ...x, role: v } : x)))}
+                    />
+                    <button
+                      onClick={() => setMembers((ms) => ms.filter((x) => keyOf(x) !== keyOf(m)))}
+                      className="flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition-colors duration-300 hover:bg-red-400/10 hover:text-red-300"
+                      aria-label="移除成员"
+                    >
+                      <IconTrash size={13} />
+                    </button>
+                  </div>
+                )
+              })}
             </div>
           </div>
 
           <div>
             <p className="mb-2 flex items-center justify-between gap-3 text-[12px] text-white/45">
               添加成员
-              <span className="text-[11px] text-white/25">来自系统已注册用户</span>
+              <span className="text-[11px] text-white/25">
+                {subjectType === 'team' ? '团队由管理员在「用户管理」中维护' : '来自系统已注册用户'}
+              </span>
             </p>
+            <div className="mb-2 flex rounded-full bg-white/[0.04] p-1 ring-1 ring-inset ring-white/[0.07]">
+              {[
+                { key: 'user', label: '按用户' },
+                { key: 'team', label: '按团队' },
+              ].map((o) => (
+                <button
+                  key={o.key}
+                  onClick={() => setSubjectType(o.key)}
+                  className={`flex-1 rounded-full py-1.5 text-[12px] transition-all duration-500 ease-fluid ${
+                    subjectType === o.key
+                      ? 'bg-aura/15 text-aura ring-1 ring-inset ring-aura/25'
+                      : 'text-white/40 hover:text-white/70'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
             <div className="flex items-center gap-2">
-              <Dropdown
-                className="min-w-0 flex-1"
-                value={pick}
-                onChange={setPick}
-                options={candidates.map((u) => ({ value: u.username, label: u.username }))}
-                placeholder={candidates.length ? '选择用户' : '没有可添加的用户'}
-              />
+              {subjectType === 'team' ? (
+                <Dropdown
+                  className="min-w-0 flex-1"
+                  value={pickTeam}
+                  onChange={setPickTeam}
+                  options={teamCandidates.map((t) => ({
+                    value: t.id,
+                    label: `${t.name}（${t.members?.length || 0} 人）`,
+                  }))}
+                  placeholder={teamCandidates.length ? '选择团队' : '没有可添加的团队'}
+                />
+              ) : (
+                <Dropdown
+                  className="min-w-0 flex-1"
+                  value={pickUser}
+                  onChange={setPickUser}
+                  options={candidates.map((u) => ({ value: u.username, label: u.username }))}
+                  placeholder={candidates.length ? '选择用户' : '没有可添加的用户'}
+                />
+              )}
               <RolePills value={role} onChange={setRole} />
               <button
                 onClick={addMember}
-                disabled={!pick}
+                disabled={subjectType === 'team' ? !pickTeam : !pickUser}
                 className="shrink-0 rounded-xl bg-aura/15 px-3.5 py-2 text-[12px] text-aura ring-1 ring-inset ring-aura/25 transition-colors duration-300 hover:bg-aura/25 disabled:opacity-40"
               >
                 添加
@@ -462,7 +540,7 @@ function AclDialog({ target, onClose, onSaved }) {
 
 /* ---------------- 侧边栏树节点 ---------------- */
 
-function TreeNode({ folder, depth, childrenOf, docCount, selectedId, collapsed, onToggle, onSelect, onAddChild }) {
+function TreeNode({ folder, depth, childrenOf, docCount, selectedId, collapsed, onToggle, onSelect, onAddChild, onAcl, user }) {
   const kids = childrenOf(folder.id)
   const hasKids = kids.length > 0
   const open = !collapsed.has(folder.id)
@@ -487,6 +565,19 @@ function TreeNode({ folder, depth, childrenOf, docCount, selectedId, collapsed, 
           <span className={`truncate text-[13px] ${active ? 'text-white' : 'text-white/65'}`}>{folder.name}</span>
           <span className="ml-auto shrink-0 pr-1 text-[11px] text-white/25">{docCount(folder.id)}</span>
         </button>
+        {(user?.role === 'admin' || (folder.owner && folder.owner === user?.username)) && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation()
+              onAcl?.({ type: 'folder', id: folder.id, name: folder.name, owner: folder.owner })
+            }}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-white/0 transition-colors duration-300 group-hover:text-white/45 hover:!text-aura"
+            title="成员权限：设置后对该文件夹及其下文档生效"
+            aria-label="设置文件夹成员权限"
+          >
+            <IconShield size={12} />
+          </button>
+        )}
         <button
           onClick={(e) => {
             e.stopPropagation()
@@ -863,6 +954,8 @@ export default function KnowledgeView({ user, onStatsChange }) {
                           }
                           onSelect={selectFolder}
                           onAddChild={(pid) => startCreate(pid)}
+                          onAcl={setAclTarget}
+                          user={user}
                         />
                         {(user?.role === 'admin' || !f.owner || f.owner === user?.username) && currentFolderId === f.id && (
                           <button

@@ -96,6 +96,38 @@ export async function saveAcl({ resourceType, resourceId, access, members }) {
   return res.json()
 }
 
+// ---------------- 团队 ----------------
+
+/** 团队列表（含成员用户名），权限弹窗与团队管理共用 */
+export async function fetchTeams() {
+  const res = await req('/api/teams')
+  if (!res.ok) throw new Error('获取团队列表失败')
+  return res.json()
+}
+
+export async function createTeam(name, members) {
+  const res = await req('/api/teams', {
+    method: 'POST',
+    body: JSON.stringify({ name, members }),
+  })
+  if (!res.ok) throw new Error((await res.json()).detail || '创建团队失败')
+  return res.json()
+}
+
+export async function updateTeam(id, name, members) {
+  const res = await req(`/api/teams/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ name, members }),
+  })
+  if (!res.ok) throw new Error((await res.json()).detail || '更新团队失败')
+  return res.json()
+}
+
+export async function deleteTeam(id) {
+  const res = await req(`/api/teams/${id}`, { method: 'DELETE' })
+  if (!res.ok) throw new Error((await res.json()).detail || '删除团队失败')
+}
+
 export async function fetchAdminUsers() {
   const res = await req('/api/admin/users')
   if (!res.ok) throw new Error('获取用户列表失败')
