@@ -39,6 +39,21 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conv_id, id);
+-- 已吊销令牌（登出 / 改密后立即失效）
+CREATE TABLE IF NOT EXISTS revoked_tokens (
+    jti         TEXT PRIMARY KEY,
+    exp         INTEGER NOT NULL
+);
+-- 资源成员权限：resource_type = folder | doc，role = viewer | editor
+CREATE TABLE IF NOT EXISTS acl (
+    resource_type TEXT NOT NULL,
+    resource_id   TEXT NOT NULL,
+    username      TEXT NOT NULL,
+    role          TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (resource_type, resource_id, username)
+);
+CREATE INDEX IF NOT EXISTS idx_acl_user ON acl(username);
 """
 
 
@@ -189,3 +204,69 @@ def get_messages(cid: str) -> list[dict]:
             m["meta"] = None
         out.append(m)
     return out
+
+
+# ---------------- 令牌吊销 ----------------
+
+
+def revoke_token(jti: str, exp: int) -> None:
+    with _conn() as c:
+        c.execute("INSERT OR REPLACE INTO revoked_tokens (jti, exp) VALUES (?,?)", (jti, int(exp)))
+        c.execute("DELETE FROM revoked_tokens WHERE exp < ?", (int(time.time()),))
+
+
+def is_token_revoked(jti: str) -> bool:
+    with _conn() as c:
+        row = c.execute("SELECT 1 FROM revoked_tokens WHERE jti=?", (jti,)).fetchone()
+    return row is not None
+
+
+# ---------------- 资源成员权限（ACL） ----------------
+
+
+def list_acl(resource_type: str, resource_id: str) -> list[dict]:
+    with _conn() as c:
+        rows = c.execute(
+            "SELECT username, role, created_at FROM acl WHERE resource_type=? AND resource_id=? ORDER BY created_at",
+            (resource_type, resource_id),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def all_acl() -> list[dict]:
+    """一次性取全量，供权限判定在内存中做继承计算。"""
+    with _conn() as c:
+        rows = c.execute("SELECT resource_type, resource_id, username, role FROM acl").fetchall()
+    return [dict(r) for r in rows]
+
+
+def set_acl(resource_type: str, resource_id: str, username: str, role: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "INSERT OR REPLACE INTO acl (resource_type, resource_id, username, role, created_at) VALUES (?,?,?,?,?)",
+            (resource_type, resource_id, username, role, _now()),
+        )
+
+
+def remove_acl(resource_type: str, resource_id: str, username: str) -> None:
+    with _conn() as c:
+        c.execute(
+            "DELETE FROM acl WHERE resource_type=? AND resource_id=? AND username=?",
+            (resource_type, resource_id, username),
+        )
+
+
+def replace_acl(resource_type: str, resource_id: str, members: list[dict]) -> None:
+    """整体覆盖某资源的成员列表（先清空再写入）。"""
+    with _conn() as c:
+        c.execute("DELETE FROM acl WHERE resource_type=? AND resource_id=?", (resource_type, resource_id))
+        for m in members:
+            c.execute(
+                "INSERT OR REPLACE INTO acl (resource_type, resource_id, username, role, created_at) VALUES (?,?,?,?,?)",
+                (resource_type, resource_id, m["username"], m["role"], _now()),
+            )
+
+
+def delete_acl_for(resource_type: str, resource_id: str) -> None:
+    with _conn() as c:
+        c.execute("DELETE FROM acl WHERE resource_type=? AND resource_id=?", (resource_type, resource_id))

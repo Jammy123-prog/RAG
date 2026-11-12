@@ -7,7 +7,7 @@
 import re
 from typing import AsyncIterator
 
-from . import kg, vectorstore
+from . import kg, perms, vectorstore
 from .config import settings
 from .ingestion import page_image_urls
 from .llm import get_llm
@@ -129,23 +129,32 @@ def _rrf_fuse(vector_hits: list[tuple], graph_hits: list[tuple], k: int = 60) ->
     return sorted(fused.values(), key=lambda x: x["rrf"], reverse=True)
 
 
-async def chat_stream(question: str, history: list[dict], viewer: dict | None = None) -> AsyncIterator[dict]:
+async def chat_stream(
+    question: str,
+    history: list[dict],
+    viewer: dict | None = None,
+    ctx=None,
+) -> AsyncIterator[dict]:
     """主流程，按事件流产出 dict：
     {type: "meta", mode, rewritten_query, sources}
     {type: "delta", text}
     {type: "done"}
 
-    viewer: {"username", "role"}，用于个人/公有知识库检索范围过滤（个人 + 公有）。
+    viewer: {"username", "role"}；ctx: perms.Ctx，用于按成员权限过滤检索范围。
     """
     rewritten, variants = await prepare_queries(question, history)
 
-    # 检索可见范围：公有知识库 + 本人私有知识库（管理员可见全部）
+    # 检索可见范围：管理员全量，其余按 perms 规则（公有 + 受限成员 + 本人私有）
     allowed = None
     if viewer and viewer.get("role") != "admin":
-        username = viewer.get("username")
+        if ctx is not None:
+            def allowed(meta: dict) -> bool:
+                return ctx.doc_role_by_id(meta.get("doc_id"), viewer) in perms.ROLES
+        else:
+            username = viewer.get("username")
 
-        def allowed(meta: dict) -> bool:
-            return meta.get("scope", "public") == "public" or meta.get("owner") in (None, username)
+            def allowed(meta: dict) -> bool:
+                return meta.get("scope", "public") == "public" or meta.get("owner") in (None, username)
 
     # 多语言多路召回 + 图增强召回（图谱命中的实体 → 邻居文档分片）+ RRF 融合
     results = _multi_query_retrieve(variants, allowed)

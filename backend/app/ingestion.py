@@ -15,7 +15,7 @@ import pymupdf
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from . import vectorstore
+from . import auth, vectorstore
 from .config import BASE_DIR, DATA_DIR, UPLOAD_DIR, settings
 
 SUPPORTED = {".pdf", ".docx", ".md", ".txt", ".csv", ".xlsx"}
@@ -238,7 +238,8 @@ def page_image_urls(doc_id: str | None, pages: list[int] | None) -> list[str]:
     for f in sorted(d.iterdir()):
         m = re.match(r"p(\d+)_", f.name)
         if m and int(m.group(1)) in pages:
-            urls.append(f"/api/images/{doc_id}/{f.name}")
+            # 带 30 分钟签名：图片接口不再裸开放，前端 <img> 直接可用
+            urls.append(auth.sign_url(f"/api/images/{doc_id}/{f.name}", ttl=1800))
     return urls
 
 

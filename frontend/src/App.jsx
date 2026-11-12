@@ -5,7 +5,7 @@ import KnowledgeView from './views/KnowledgeView.jsx'
 import LoginView from './views/LoginView.jsx'
 import OverviewView from './views/OverviewView.jsx'
 import UsersView from './views/UsersView.jsx'
-import { fetchMe, setToken, setUnauthorizedHandler } from './lib/api'
+import { fetchMe, logout as logoutApi, setToken, setUnauthorizedHandler } from './lib/api'
 import { setPendingAsk } from './lib/askBus'
 import { IconChat, IconVault, IconPulse, IconUsers, IconGraph } from './components/icons.jsx'
 
@@ -24,6 +24,7 @@ export default function App() {
   }, [])
 
   const logout = () => {
+    logoutApi() // 服务端吊销令牌（异步，不阻塞界面）
     setToken(null)
     setUser(null)
     setTab('chat')

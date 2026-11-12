@@ -1,7 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import DocumentPreview from '../components/DocumentPreview.jsx'
-import { createFolder, deleteDocument, deleteFolder, fetchDocuments, fetchFolders, uploadDocuments } from '../lib/api'
-import { IconUpload, IconDoc, IconTrash } from '../components/icons.jsx'
+import {
+  createFolder,
+  deleteDocument,
+  deleteFolder,
+  fetchAcl,
+  fetchAdminUsers,
+  fetchDocuments,
+  fetchFolders,
+  saveAcl,
+  uploadDocuments,
+} from '../lib/api'
+import { IconUpload, IconDoc, IconTrash, IconShield } from '../components/icons.jsx'
 
 const fmtSize = (b) => (b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`)
 
@@ -70,8 +81,8 @@ function UploadingCard({ name, startedAt }) {
   )
 }
 
-function DocRow({ d, user, onOpen, onRemove, delay }) {
-  const canDelete = user?.role === 'admin' || !d.owner || d.owner === user?.username
+function DocRow({ d, user, onOpen, onRemove, onAcl, delay }) {
+  const canDelete = d.can_edit ?? (user?.role === 'admin' || !d.owner || d.owner === user?.username)
   return (
     <div
       className="group flex items-center gap-4 rounded-[1.5rem] bg-white/[0.03] p-1.5 ring-1 ring-inset ring-white/[0.06] transition-all duration-700 ease-fluid animate-reveal hover:bg-white/[0.05] hover:ring-white/[0.1]"
@@ -108,7 +119,19 @@ function DocRow({ d, user, onOpen, onRemove, delay }) {
           <span className="hidden shrink-0 rounded-full bg-sky-400/10 px-3 py-1 text-[11px] font-medium text-sky-300 ring-1 ring-inset ring-sky-400/25 sm:block">公有</span>
         )}
         {d.owner && (
-          <span className="hidden shrink-0 rounded-full bg-white/[0.05] px-2.5 py-1 text-[11px] text-white/40 ring-1 ring-inset ring-white/[0.08] md:block">{d.owner}</span>
+          <span className="hidden shrink-0 rounded-full bg-white/[0.05] px-2.5 py-1 text-[11px] text-white/40 ring-1 ring-inset ring-white/[0.08] md:block" title="文档创建者">
+            创建者 {d.owner}
+          </span>
+        )}
+        {user?.role === 'admin' && (
+          <button
+            onClick={() => onAcl?.({ type: 'doc', id: d.doc_id, name: d.name, owner: d.owner })}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white/20 transition-all duration-500 ease-fluid hover:bg-aura/10 hover:text-aura active:scale-90"
+            title="成员权限"
+            aria-label="设置成员权限"
+          >
+            <IconShield size={16} />
+          </button>
         )}
         {canDelete ? (
           <button
@@ -128,6 +151,205 @@ function DocRow({ d, user, onOpen, onRemove, delay }) {
         )}
       </div>
     </div>
+  )
+}
+
+/* ---------------- 成员权限弹窗（管理员） ---------------- */
+
+function AclDialog({ target, onClose, onSaved }) {
+  const [access, setAccess] = useState('open')
+  const [members, setMembers] = useState([])
+  const [users, setUsers] = useState([])
+  const [pick, setPick] = useState('')
+  const [role, setRole] = useState('viewer')
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+
+  useEffect(() => {
+    let alive = true
+    Promise.all([fetchAcl(target.type, target.id), fetchAdminUsers().catch(() => [])])
+      .then(([acl, list]) => {
+        if (!alive) return
+        setAccess(acl.access || 'open')
+        setMembers(acl.members || [])
+        const arr = Array.isArray(list) ? list : []
+        setUsers(arr)
+        setPick(arr[0]?.username || '')
+      })
+      .catch((e) => alive && setErr(e.message))
+      .finally(() => alive && setLoading(false))
+    return () => {
+      alive = false
+    }
+  }, [target.id, target.type])
+
+  const candidates = users.filter((u) => !members.some((m) => m.username === u.username))
+
+  const addMember = () => {
+    if (!pick) return
+    setMembers((ms) => (ms.some((m) => m.username === pick) ? ms : [...ms, { username: pick, role }]))
+  }
+
+  const save = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      await saveAcl({
+        resourceType: target.type,
+        resourceId: target.id,
+        access,
+        members: members.map((m) => ({ username: m.username, role: m.role })),
+      })
+      onSaved?.()
+      onClose()
+    } catch (e) {
+      setErr(e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return createPortal(
+    <div
+      className="lightbox-backdrop fixed inset-0 z-[100] flex items-center justify-center bg-black/70 p-4 backdrop-blur-xl"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
+      <div
+        className="lightbox-panel flex max-h-[86vh] w-full max-w-lg flex-col overflow-hidden rounded-[1.75rem] bg-[#0b0b0d] ring-1 ring-white/10"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start justify-between gap-4 border-b border-white/[0.07] px-6 py-5">
+          <div className="min-w-0">
+            <p className="flex items-center gap-2 text-[10px] font-medium uppercase tracking-[0.22em] text-white/35">
+              <IconShield size={13} /> 成员权限
+            </p>
+            <h3 className="mt-2 truncate text-[16px] font-semibold text-white/90">{target.name || '未命名'}</h3>
+            <p className="mt-1 truncate text-[12px] text-white/35">
+              {target.type === 'folder' ? '文件夹' : '文档'} · 创建者 {target.owner || '未知'}
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white/35 transition-colors duration-300 hover:bg-white/[0.08] hover:text-white"
+            aria-label="关闭"
+          >
+            <svg width="12" height="12" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round">
+              <path d="M2 2l10 10M12 2L2 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="flex-1 space-y-5 overflow-y-auto px-6 py-5">
+          <div>
+            <p className="mb-2 text-[12px] text-white/45">可见范围</p>
+            <div className="flex rounded-full bg-white/[0.04] p-1 ring-1 ring-inset ring-white/[0.07]">
+              {[
+                { key: 'open', label: '所有人可见' },
+                { key: 'restricted', label: '仅指定成员' },
+              ].map((o) => (
+                <button
+                  key={o.key}
+                  onClick={() => setAccess(o.key)}
+                  className={`flex-1 rounded-full py-1.5 text-[12px] transition-all duration-500 ease-fluid ${
+                    access === o.key ? 'bg-aura/15 text-aura ring-1 ring-inset ring-aura/25' : 'text-white/40 hover:text-white/70'
+                  }`}
+                >
+                  {o.label}
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] leading-relaxed text-white/25">
+              「仅指定成员」时，仅下方授权的成员可查看；子文件夹与文档默认继承上级设置。
+            </p>
+          </div>
+
+          <div>
+            <p className="mb-2 text-[12px] text-white/45">成员 · {members.length}</p>
+            <div className="space-y-1.5">
+              {members.length === 0 && (
+                <p className="rounded-xl bg-white/[0.03] px-3 py-3 text-[12px] text-white/30">还没有单独授权的成员</p>
+              )}
+              {members.map((m) => (
+                <div
+                  key={m.username}
+                  className="flex items-center gap-2 rounded-xl bg-white/[0.04] px-3 py-2 ring-1 ring-inset ring-white/[0.06]"
+                >
+                  <span className="min-w-0 flex-1 truncate text-[13px] text-white/75">{m.username}</span>
+                  <select
+                    value={m.role}
+                    onChange={(e) =>
+                      setMembers((ms) => ms.map((x) => (x.username === m.username ? { ...x, role: e.target.value } : x)))
+                    }
+                    className="rounded-lg bg-white/[0.06] px-2 py-1 text-[12px] text-white/70 outline-none"
+                  >
+                    <option value="viewer">可查看</option>
+                    <option value="editor">可编辑</option>
+                  </select>
+                  <button
+                    onClick={() => setMembers((ms) => ms.filter((x) => x.username !== m.username))}
+                    className="flex h-7 w-7 items-center justify-center rounded-lg text-white/25 transition-colors duration-300 hover:bg-red-400/10 hover:text-red-300"
+                    aria-label="移除成员"
+                  >
+                    <IconTrash size={13} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-end gap-2">
+            <label className="min-w-0 flex-1">
+              <span className="mb-1.5 block text-[12px] text-white/45">添加成员</span>
+              <select
+                value={pick}
+                onChange={(e) => setPick(e.target.value)}
+                className="w-full rounded-xl bg-white/[0.05] px-3 py-2 text-[13px] text-white/70 outline-none ring-1 ring-inset ring-white/[0.08]"
+              >
+                {candidates.length === 0 && <option value="">（没有可添加的用户）</option>}
+                {candidates.map((u) => (
+                  <option key={u.id || u.username} value={u.username}>
+                    {u.username}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <select
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              className="rounded-xl bg-white/[0.05] px-2 py-2 text-[12px] text-white/70 outline-none ring-1 ring-inset ring-white/[0.08]"
+            >
+              <option value="viewer">可查看</option>
+              <option value="editor">可编辑</option>
+            </select>
+            <button
+              onClick={addMember}
+              disabled={!pick}
+              className="rounded-xl bg-aura/15 px-3 py-2 text-[12px] text-aura ring-1 ring-inset ring-aura/25 transition-colors duration-300 hover:bg-aura/25 disabled:opacity-40"
+            >
+              添加
+            </button>
+          </div>
+          {err && <p className="text-[12px] text-red-300/90">{err}</p>}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 border-t border-white/[0.07] px-6 py-4">
+          <button onClick={onClose} className="rounded-full px-4 py-2 text-[13px] text-white/45 transition-colors duration-300 hover:text-white/80">
+            取消
+          </button>
+          <button
+            onClick={save}
+            disabled={busy || loading}
+            className="rounded-full bg-gradient-to-br from-aura to-aura/70 px-5 py-2 text-[13px] font-medium text-white shadow-[0_8px_24px_-8px_rgba(167,139,250,0.55)] transition-all duration-500 ease-fluid active:scale-[0.97] disabled:opacity-40"
+          >
+            {busy ? '保存中…' : '保存'}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -208,6 +430,7 @@ export default function KnowledgeView({ user, onStatsChange }) {
   const [creating, setCreating] = useState(null) // { parentId } | null
   const [newName, setNewName] = useState('')
   const [preview, setPreview] = useState(null)
+  const [aclTarget, setAclTarget] = useState(null) // { type: 'folder'|'doc', id, name, owner }
   const inputRef = useRef(null)
   const statsRef = useRef(onStatsChange)
   statsRef.current = onStatsChange
@@ -573,6 +796,17 @@ export default function KnowledgeView({ user, onStatsChange }) {
                   {currentFolderId ? '新建子文件夹' : '新建文件夹'}
                 </button>
               )}
+              {currentFolder && user?.role === 'admin' && (
+                <button
+                  onClick={() =>
+                    setAclTarget({ type: 'folder', id: currentFolder.id, name: currentFolder.name, owner: currentFolder.owner })
+                  }
+                  className="flex items-center gap-1.5 rounded-full bg-white/[0.03] px-3 py-1.5 text-[12px] text-white/45 ring-1 ring-inset ring-white/[0.06] transition-all duration-500 ease-fluid hover:text-aura active:scale-[0.97]"
+                >
+                  <IconShield size={12} />
+                  成员权限
+                </button>
+              )}
               {currentFolder && (user?.role === 'admin' || !currentFolder.owner || currentFolder.owner === user?.username) && (
                 <button
                   onClick={() => removeFolder(currentFolder)}
@@ -692,7 +926,7 @@ export default function KnowledgeView({ user, onStatsChange }) {
               </div>
               <div className="grid gap-3">
                 {searchResults?.map((d, i) => (
-                  <DocRow key={d.doc_id} d={d} user={user} onOpen={setPreview} onRemove={remove} delay={`${Math.min(i, 10) * 60}ms`} />
+                  <DocRow key={d.doc_id} d={d} user={user} onOpen={setPreview} onRemove={remove} onAcl={setAclTarget} delay={`${Math.min(i, 10) * 60}ms`} />
                 ))}
                 {searchResults?.length === 0 && !searching && (
                   <p className="rounded-2xl bg-white/[0.03] px-4 py-6 text-center text-[13px] text-white/35">
@@ -748,7 +982,7 @@ export default function KnowledgeView({ user, onStatsChange }) {
                 </div>
                 <div className="grid gap-3">
                   {currentDocs.map((d, i) => (
-                    <DocRow key={d.doc_id} d={d} user={user} onOpen={setPreview} onRemove={remove} delay={`${Math.min(i, 10) * 60}ms`} />
+                    <DocRow key={d.doc_id} d={d} user={user} onOpen={setPreview} onRemove={remove} onAcl={setAclTarget} delay={`${Math.min(i, 10) * 60}ms`} />
                   ))}
                   {currentDocs.length === 0 && (
                     <p className="rounded-2xl bg-white/[0.03] px-4 py-8 text-center text-[13px] leading-relaxed text-white/35">
@@ -767,6 +1001,7 @@ export default function KnowledgeView({ user, onStatsChange }) {
       </div>
 
       {preview && <DocumentPreview doc={preview} onClose={() => setPreview(null)} />}
+      {aclTarget && <AclDialog target={aclTarget} onClose={() => setAclTarget(null)} onSaved={refresh} />}
 
       {toast && (
         <div className="fixed bottom-8 left-1/2 z-50 -translate-x-1/2 animate-reveal">

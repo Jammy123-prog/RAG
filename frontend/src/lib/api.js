@@ -56,6 +56,39 @@ export async function fetchMe() {
   return res.json()
 }
 
+/** 通知服务端吊销当前令牌（失败也不影响本地登出） */
+export async function logout() {
+  if (!token) return
+  try {
+    await req('/api/auth/logout', { method: 'POST' })
+  } catch {
+    /* 忽略 */
+  }
+}
+
+// ---------------- 成员权限（ACL） ----------------
+
+export async function fetchAcl(resourceType, resourceId) {
+  const p = new URLSearchParams({ resource_type: resourceType, resource_id: resourceId })
+  const res = await req(`/api/acl?${p}`)
+  if (!res.ok) throw new Error((await res.json()).detail || '读取权限失败')
+  return res.json()
+}
+
+export async function saveAcl({ resourceType, resourceId, access, members }) {
+  const res = await req('/api/acl', {
+    method: 'PUT',
+    body: JSON.stringify({
+      resource_type: resourceType,
+      resource_id: resourceId,
+      access,
+      members,
+    }),
+  })
+  if (!res.ok) throw new Error((await res.json()).detail || '保存权限失败')
+  return res.json()
+}
+
 export async function fetchAdminUsers() {
   const res = await req('/api/admin/users')
   if (!res.ok) throw new Error('获取用户列表失败')

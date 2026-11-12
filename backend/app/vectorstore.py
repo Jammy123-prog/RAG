@@ -86,6 +86,7 @@ def register_document(
         "owner": owner,
         "scope": scope,  # public=公有知识库 / private=个人知识库
         "folder_id": folder_id,  # 知识库内的文件夹归属（None=未分组）
+        "access": "open",  # open=全员可见 / restricted=仅指定成员
         "path": path,  # 原文件路径（用于在线预览/下载）
         "uploaded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "status": "ready",
@@ -184,10 +185,31 @@ def create_folder(
         "scope": scope,
         "owner": owner,
         "parent_id": parent_id,
+        "access": "open",  # open=全员可见 / restricted=仅指定成员
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
     _save_folders(folders)
     return folders[fid]
+
+
+def set_folder_access(folder_id: str, access: str) -> dict | None:
+    """设置文件夹可见范围（open / restricted）。"""
+    folders = _load_folders()
+    if folder_id not in folders:
+        return None
+    folders[folder_id]["access"] = access
+    _save_folders(folders)
+    return folders[folder_id]
+
+
+def set_document_access(doc_id: str, access: str) -> dict | None:
+    """设置单份文档的可见范围（open / restricted），优先级高于文件夹继承。"""
+    reg = _load_registry()
+    if doc_id not in reg:
+        return None
+    reg[doc_id]["access"] = access
+    _save_registry(reg)
+    return reg[doc_id]
 
 
 def delete_folder(folder_id: str) -> bool:

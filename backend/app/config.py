@@ -61,6 +61,8 @@ class Settings(BaseSettings):
     # 服务
     host: str = "0.0.0.0"
     port: int = 8000
+    # CORS 白名单（逗号分隔）：填前端实际访问地址，如 http://192.168.1.99:5173
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
 
 settings = Settings()

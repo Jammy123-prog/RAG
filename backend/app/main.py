@@ -11,34 +11,45 @@
 - 前端生产构建由本服务单端口托管（/），局域网直接访问 :8010
 """
 import json
+import logging
 import shutil
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import ingestion, kg, preview as doc_preview, store, vectorstore
+from . import auth, ingestion, kg, perms, preview as doc_preview, store, vectorstore
 from .auth import get_user, make_token, require_admin
 from .config import BASE_DIR, DATA_DIR, settings
 from .rag import chat_stream
 
 app = FastAPI(title="企业知识库 RAG 系统", version="1.1.0")
+logger = logging.getLogger("nexus.kb")
+
+
+def _safe_error(exc: Exception, fallback: str = "服务内部错误，请稍后重试") -> str:
+    """只回传业务侧主动抛出的可读错误，其余统一兜底，避免泄露路径 / 堆栈。"""
+    text = str(exc).strip()
+    if isinstance(exc, ValueError) and text and len(text) <= 200 and "\n" not in text:
+        return text
+    logger.exception("内部错误: %s", exc)
+    return fallback
 
 store.init_db()
 vectorstore.backfill_paths()  # 历史文档补全原文件路径（支持页面级预览/下载）
 
 # 文档内嵌图片：/api/images/{doc_id}/p{页}_{序号}.jpg
-app.mount("/api/images", StaticFiles(directory=ingestion.IMAGES_DIR), name="images")
-
+# 不再用 StaticFiles 裸挂载（那样任何人拿到 URL 就能读私有文档插图），
+# 改为带短时签名校验的受控路由，见下方 document_image。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[o.strip() for o in settings.cors_origins.split(",") if o.strip()],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -73,6 +84,21 @@ async def login(form: AuthForm):
 @app.get("/api/auth/me")
 async def me(user: dict = Depends(get_user)):
     return _safe_user(user)
+
+
+@app.post("/api/auth/logout")
+async def logout(request: Request):
+    """登出：当前令牌 jti 写入吊销表，立即失效，不必等 7 天自然过期。"""
+    claims = auth.parse_token(auth.token_from_request(request))
+    if claims and claims["jti"]:
+        store.revoke_token(claims["jti"], claims["exp"])
+    return {"ok": True}
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception(request: Request, exc: Exception):
+    """兜底异常：不把堆栈、路径等内部信息透给前端。"""
+    return JSONResponse(status_code=500, content={"detail": "服务内部错误，请稍后重试或联系管理员"})
 
 
 def _safe_user(u: dict) -> dict:
@@ -154,7 +180,12 @@ async def chat_stream_endpoint(req: ChatRequest, user: dict = Depends(get_user))
         meta_info = {"conversation_id": cid, "mode": "fallback", "sources": []}
         answer = ""
         try:
-            async for event in chat_stream(req.message, history, viewer={"username": user["username"], "role": user["role"]}):
+            async for event in chat_stream(
+                req.message,
+                history,
+                viewer={"username": user["username"], "role": user["role"]},
+                ctx=perms.Ctx(),
+            ):
                 if event["type"] == "meta":
                     meta_info.update({"mode": event["mode"], "sources": event["sources"], "graph_docs": event.get("graph_docs", [])})
                 elif event["type"] == "delta":
@@ -163,7 +194,7 @@ async def chat_stream_endpoint(req: ChatRequest, user: dict = Depends(get_user))
         except Exception as e:  # 流式出错也给出明确信号
             if answer:
                 answer += "\n\n（生成中断）"
-            yield f"event: error\ndata: {json.dumps({'message': str(e)}, ensure_ascii=False)}\n\n"
+            yield f"event: error\ndata: {json.dumps({'message': _safe_error(e, '生成中断，请稍后重试')}, ensure_ascii=False)}\n\n"
         finally:
             meta_info.pop("conversation_id", None)
             store.add_message(cid, "assistant", answer or "（无内容）", {"mode": meta_info["mode"], "sources": meta_info["sources"]})
@@ -203,22 +234,13 @@ class FolderForm(BaseModel):
 
 
 def _visible_doc(d: dict, user: dict) -> bool:
-    return (
-        user["role"] == "admin"
-        or d.get("scope", "public") == "public"
-        or d.get("owner") in (None, user["username"])
-    )
+    return perms.Ctx().doc_role(d, user) is not None
 
 
 @app.get("/api/folders")
 async def list_folders(user: dict = Depends(get_user)):
-    """文件夹列表（附文档数）：公有文件夹 + 本人私有文件夹，管理员可见全部。"""
-    folders = vectorstore.list_folders()
-    out = []
-    for f in folders:
-        if user["role"] == "admin" or f.get("scope", "public") == "public" or f.get("owner") in (None, user["username"]):
-            out.append(f)
-    return out
+    """文件夹列表（附文档数与当前用户的角色）：可见性走成员权限规则。"""
+    return perms.annotate_folders(vectorstore.list_folders(), user)
 
 
 @app.post("/api/folders")
@@ -235,6 +257,8 @@ async def create_folder(form: FolderForm, user: dict = Depends(get_user)):
             raise HTTPException(404, "父文件夹不存在")
         if parent.get("scope", "public") != form.scope:
             raise HTTPException(400, "父文件夹归属与当前知识库不一致")
+        if perms.Ctx().folder_role(parent, user) != perms.EDITOR:
+            raise HTTPException(403, "没有在该文件夹下新建子文件夹的权限")
     try:
         return vectorstore.create_folder(name, scope=form.scope, owner=user["username"], parent_id=parent_id)
     except ValueError as e:
@@ -247,9 +271,19 @@ async def delete_folder(folder_id: str, user: dict = Depends(get_user)):
     info = folders.get(folder_id)
     if not info:
         raise HTTPException(404, "文件夹不存在")
-    if user["role"] != "admin" and info.get("owner") not in (None, user["username"]):
-        raise HTTPException(403, "仅文件夹创建者或管理员可删除")
+    if perms.Ctx().folder_role(info, user) != perms.EDITOR:
+        raise HTTPException(403, "仅文件夹创建者、管理员或被授予编辑权的人可删除")
+    # 先算出将被删除的后代，便于一并清理其成员权限
+    doomed, changed = {folder_id}, True
+    while changed:
+        changed = False
+        for fid, f in folders.items():
+            if fid not in doomed and f.get("parent_id") in doomed:
+                doomed.add(fid)
+                changed = True
     vectorstore.delete_folder(folder_id)
+    for fid in doomed:
+        store.delete_acl_for("folder", fid)
     return {"ok": True, "message": "文件夹及其子文件夹已删除，其中文档已移到上一级"}
 
 
@@ -272,6 +306,8 @@ async def upload_documents(
             raise HTTPException(404, "目标文件夹不存在")
         if folder.get("scope", "public") != scope:
             raise HTTPException(400, "文件夹归属与上传知识库不一致")
+        if perms.Ctx().folder_role(folder, user) != perms.EDITOR:
+            raise HTTPException(403, "没有向该文件夹上传文档的权限")
     payloads = [(await f.read(), f.filename or "untitled") for f in files]
 
     def process(item: tuple[bytes, str]) -> dict:
@@ -283,7 +319,7 @@ async def upload_documents(
             path = ingestion.save_upload(data, filename)
             return {"success": [ingestion.ingest_file(path, display_name=filename, owner=user["username"], scope=scope, folder_id=folder_id)]}
         except Exception as e:
-            return {"errors": [{"name": filename, "error": str(e)}]}
+            return {"errors": [{"name": filename, "error": _safe_error(e, "文档处理失败，请检查文件格式或联系管理员")}]}
 
     with ThreadPoolExecutor(max_workers=min(4, max(1, len(payloads)))) as ex:
         outs = list(ex.map(process, payloads))
@@ -301,7 +337,8 @@ async def list_documents(q: str = "", folder_id: str = "", user: dict = Depends(
     q 的匹配策略：文件名包含关键词（直接命中）+ 向量检索命中的分片所属文档（语义命中），
     结果标注 match 字段，前端用不同徽标区分。
     """
-    docs = [d for d in vectorstore.list_documents() if _visible_doc(d, user)]
+    ctx = perms.Ctx()
+    docs = perms.annotate_docs(vectorstore.list_documents(), user, ctx)
     if folder_id:
         docs = [d for d in docs if (d.get("folder_id") or "") == folder_id]
 
@@ -314,11 +351,7 @@ async def list_documents(q: str = "", folder_id: str = "", user: dict = Depends(
     semantic: dict[str, float] = {}
 
     def allowed(meta: dict) -> bool:
-        return (
-            user["role"] == "admin"
-            or meta.get("scope", "public") == "public"
-            or meta.get("owner") in (None, user["username"])
-        )
+        return ctx.doc_role_by_id(meta.get("doc_id"), user) in perms.ROLES
 
     try:
         for doc, score in vectorstore.search(keyword, top_k=12, allowed=allowed):
@@ -395,17 +428,34 @@ async def document_page(doc_id: str, page_no: int, scale: float = 2.0, user: dic
     return Response(content=data, media_type=media, headers={"Cache-Control": "private, max-age=3600"})
 
 
+@app.get("/api/images/{doc_id}/{filename}")
+def document_image(doc_id: str, filename: str, e: str = "", s: str = ""):
+    """文档插图/页面快照。
+
+    前端 <img src> 无法携带 Authorization，因此改用短时签名链接（生成 sources 时签发）。
+    路径做 resolve 后前缀校验，杜绝 ../ 穿越。
+    """
+    if not auth.verify_signed(f"/api/images/{doc_id}/{filename}", e, s):
+        raise HTTPException(401, "图片链接无效或已过期")
+    base = (ingestion.IMAGES_DIR / doc_id).resolve()
+    target = (base / filename).resolve()
+    if base not in target.parents or not target.is_file():
+        raise HTTPException(404, "图片不存在")
+    return FileResponse(target, headers={"Cache-Control": "private, max-age=600"})
+
+
 @app.delete("/api/documents/{doc_id}")
 async def delete_document(doc_id: str, user: dict = Depends(get_user)):
     docs = {d["doc_id"]: d for d in vectorstore.list_documents()}
     info = docs.get(doc_id)
     if not info:
         raise HTTPException(404, "文档不存在")
-    # 权限：管理员或上传者本人可删除
-    if user["role"] != "admin" and info.get("owner") not in (None, user["username"]):
-        raise HTTPException(403, f"仅管理员或上传者（{info.get('owner')}）可删除该文档")
+    # 权限：管理员 / 上传者 / 被授予编辑权的人可删除
+    if not perms.Ctx().can_edit_doc(doc_id, user):
+        raise HTTPException(403, f"仅管理员、上传者（{info.get('owner')}）或被授予编辑权的人可删除该文档")
     if not vectorstore.delete_document(doc_id):
         raise HTTPException(404, "文档不存在")
+    store.delete_acl_for("doc", doc_id)
     # 知识图谱联动清理（Neo4j 未连接时静默跳过，不影响向量库删除）
     kg.remove_document(doc_id)
     shutil.rmtree(ingestion.IMAGES_DIR / doc_id, ignore_errors=True)
@@ -413,6 +463,79 @@ async def delete_document(doc_id: str, user: dict = Depends(get_user)):
     if info.get("path"):
         Path(info["path"]).unlink(missing_ok=True)
     return {"ok": True}
+
+
+# ==================== 成员权限（管理员配置，参照 WPS 团队文档） ====================
+
+
+class AclMember(BaseModel):
+    username: str
+    role: str = "viewer"
+
+
+class AclForm(BaseModel):
+    resource_type: str  # folder | doc
+    resource_id: str
+    access: str = "open"  # open=全员可见 / restricted=仅指定成员
+    members: list[AclMember] = []
+
+
+def _acl_target(resource_type: str, resource_id: str) -> dict | None:
+    if resource_type == "folder":
+        return next((f for f in vectorstore.list_folders() if f["id"] == resource_id), None)
+    if resource_type == "doc":
+        return vectorstore.get_document(resource_id)
+    return None
+
+
+@app.get("/api/acl")
+async def get_acl(resource_type: str, resource_id: str, user: dict = Depends(get_user)):
+    """查看文件夹 / 文档的可见范围与成员（管理员）。"""
+    require_admin(user)
+    info = _acl_target(resource_type, resource_id)
+    if not info:
+        raise HTTPException(404, "资源不存在")
+    return {
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "name": info.get("name"),
+        "owner": info.get("owner"),
+        "access": info.get("access") or "open",
+        "members": store.list_acl(resource_type, resource_id),
+    }
+
+
+@app.put("/api/acl")
+async def put_acl(form: AclForm, user: dict = Depends(get_user)):
+    """覆盖式保存成员权限（管理员）：可见范围 + 成员角色。"""
+    require_admin(user)
+    if form.resource_type not in ("folder", "doc"):
+        raise HTTPException(400, "resource_type 仅支持 folder / doc")
+    if form.access not in ("open", "restricted"):
+        raise HTTPException(400, "access 仅支持 open / restricted")
+    if not _acl_target(form.resource_type, form.resource_id):
+        raise HTTPException(404, "资源不存在")
+
+    valid = {u["username"] for u in store.list_users()}
+    seen: set[str] = set()
+    members = []
+    for m in form.members:
+        name = m.username.strip()
+        if name not in valid:
+            raise HTTPException(400, f"用户「{name}」不存在")
+        if m.role not in perms.ROLES:
+            raise HTTPException(400, "角色仅支持 viewer / editor")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        members.append({"username": name, "role": m.role})
+
+    if form.resource_type == "folder":
+        vectorstore.set_folder_access(form.resource_id, form.access)
+    else:
+        vectorstore.set_document_access(form.resource_id, form.access)
+    store.replace_acl(form.resource_type, form.resource_id, members)
+    return {"ok": True, "access": form.access, "members": members}
 
 
 # ==================== 知识图谱（Neo4j，新增模块） ====================
