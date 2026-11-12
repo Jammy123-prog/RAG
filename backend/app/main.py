@@ -146,7 +146,25 @@ async def delete_conversation(cid: str, user: dict = Depends(get_user)):
 async def conversation_messages(cid: str, user: dict = Depends(get_user)):
     if not store.get_conversation(cid, user["id"]):
         raise HTTPException(404, "会话不存在")
-    return store.get_messages(cid)
+    msgs = store.get_messages(cid)
+    # 历史消息里的引用：图片链接是短时签名的，落库后必然过期 → 重新签发；
+    # 同时按当前权限过滤掉已无权查看的来源。
+    ctx = perms.Ctx()
+    for m in msgs:
+        meta = m.get("meta") or {}
+        sources = meta.get("sources") or []
+        if not sources:
+            continue
+        kept = []
+        for s in sources:
+            if ctx.doc_role_by_id(s.get("doc_id"), user) is None:
+                continue
+            if s.get("pages"):
+                s["images"] = ingestion.page_image_urls(s.get("doc_id"), s["pages"])
+            kept.append(s)
+        meta["sources"] = kept
+        m["meta"] = meta
+    return msgs
 
 
 # ==================== 问答（SSE 流式 + 落库持久化） ====================
