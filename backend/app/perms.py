@@ -78,6 +78,13 @@ class Ctx:
 
     # ---- 对外 ----
 
+    def is_folder_owner_of_doc(self, doc: dict | None, user: dict) -> bool:
+        """当前用户是不是该文档所在文件夹（含任一祖先）的创建者。"""
+        name = user.get("username")
+        if not doc or not name:
+            return False
+        return any((self.folders.get(fid) or {}).get("owner") == name for fid in self._chain(doc.get("folder_id")))
+
     def doc_role(self, doc: dict | None, user: dict) -> str | None:
         if not doc:
             return None
@@ -85,6 +92,9 @@ class Ctx:
             return EDITOR
         name = user.get("username")
         if doc.get("owner") == name:
+            return EDITOR
+        # 文件夹创建者管理自己文件夹（含子文件夹）里的文档，不限于自己上传的
+        if self.is_folder_owner_of_doc(doc, user):
             return EDITOR
         if (doc.get("scope") or "public") == "private":
             # 个人库文档只对 owner 开放（owner 已在上面放行）；无 owner 的历史数据不再默认放开
@@ -134,6 +144,15 @@ class Ctx:
         return self.doc_role_by_id(doc_id, user) == EDITOR
 
 
+def can_manage_doc(ctx: Ctx, doc: dict, user: dict) -> bool:
+    """能否管理该文档（配置成员权限）：管理员、上传者、所在文件夹的创建者。"""
+    if user.get("role") == "admin":
+        return True
+    if doc.get("owner") == user.get("username"):
+        return True
+    return ctx.is_folder_owner_of_doc(doc, user)
+
+
 def annotate_docs(docs: list[dict], user: dict, ctx: Ctx | None = None) -> list[dict]:
     """过滤不可见文档，并补上当前用户的角色标记。"""
     ctx = ctx or Ctx()
@@ -141,7 +160,7 @@ def annotate_docs(docs: list[dict], user: dict, ctx: Ctx | None = None) -> list[
     for d in docs:
         role = ctx.doc_role(d, user)
         if role:
-            out.append({**d, "role": role, "can_edit": role == EDITOR})
+            out.append({**d, "role": role, "can_edit": role == EDITOR, "can_manage": can_manage_doc(ctx, d, user)})
     return out
 
 

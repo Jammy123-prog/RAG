@@ -590,20 +590,24 @@ async def delete_team(team_id: str, user: dict = Depends(get_user)):
     return {"ok": True}
 
 
-def _require_acl_manager(user: dict, info: dict) -> None:
-    """成员权限的配置人：管理员，或该资源的创建者（WPS 里「我分享」的语义）。"""
+def _require_acl_manager(user: dict, info: dict, resource_type: str = "folder") -> None:
+    """成员权限的配置人：管理员、资源创建者，或文档所在文件夹的创建者。"""
     if user.get("role") == "admin" or info.get("owner") == user.get("username"):
         return
-    raise HTTPException(403, "仅管理员或该资源创建者可设置成员权限")
+    if resource_type == "doc":
+        ctx = perms.Ctx()
+        if ctx.is_folder_owner_of_doc(ctx.docs.get(info.get("doc_id") or ""), user):
+            return
+    raise HTTPException(403, "仅管理员、资源创建者或所在文件夹创建者可设置成员权限")
 
 
 @app.get("/api/acl")
 async def get_acl(resource_type: str, resource_id: str, user: dict = Depends(get_user)):
-    """查看文件夹 / 文档的可见范围与成员（管理员或资源创建者）。"""
+    """查看文件夹 / 文档的可见范围与成员（管理员、资源创建者或所在文件夹创建者）。"""
     info = _acl_target(resource_type, resource_id)
     if not info:
         raise HTTPException(404, "资源不存在")
-    _require_acl_manager(user, info)
+    _require_acl_manager(user, info, resource_type)
     teams = {t["id"]: t for t in store.list_teams()}
     members = []
     for m in store.list_acl(resource_type, resource_id):
@@ -626,7 +630,7 @@ async def get_acl(resource_type: str, resource_id: str, user: dict = Depends(get
 
 @app.put("/api/acl")
 async def put_acl(form: AclForm, user: dict = Depends(get_user)):
-    """覆盖式保存成员权限（管理员或资源创建者）：可见范围 + 成员/团队角色。"""
+    """覆盖式保存成员权限（管理员、资源创建者或所在文件夹创建者）：可见范围 + 成员/团队角色。"""
     if form.resource_type not in ("folder", "doc"):
         raise HTTPException(400, "resource_type 仅支持 folder / doc")
     if form.access not in ("open", "restricted"):
@@ -634,7 +638,7 @@ async def put_acl(form: AclForm, user: dict = Depends(get_user)):
     info = _acl_target(form.resource_type, form.resource_id)
     if not info:
         raise HTTPException(404, "资源不存在")
-    _require_acl_manager(user, info)
+    _require_acl_manager(user, info, form.resource_type)
 
     valid_users = {u["username"] for u in store.list_users()}
     valid_teams = {t["id"] for t in store.list_teams()}

@@ -86,6 +86,8 @@ function DocRow({ d, user, onOpen, onRemove, onAcl, delay }) {
   const mine = !!d.owner && d.owner === user?.username
   // 开放区里创建者对自己上传的文档天然可管理；无 owner 的历史文档只留给管理员
   const canDelete = d.can_edit ?? (user?.role === 'admin' || mine)
+  // 管理权：管理员 / 上传者 / 所在文件夹创建者（后端 can_manage）
+  const canManage = d.can_manage ?? (user?.role === 'admin' || mine)
   return (
     <div
       className="group flex items-center gap-4 rounded-[1.5rem] bg-white/[0.03] p-1.5 ring-1 ring-inset ring-white/[0.06] transition-all duration-700 ease-fluid animate-reveal hover:bg-white/[0.05] hover:ring-white/[0.1]"
@@ -133,11 +135,11 @@ function DocRow({ d, user, onOpen, onRemove, onAcl, delay }) {
             创建者 {mine ? '我' : d.owner}
           </span>
         )}
-        {(user?.role === 'admin' || mine) && (
+        {canManage && (
           <button
             onClick={() => onAcl?.({ type: 'doc', id: d.doc_id, name: d.name, owner: d.owner })}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white/20 transition-all duration-500 ease-fluid hover:bg-aura/10 hover:text-aura active:scale-90"
-            title="成员权限"
+            title={mine ? '成员权限' : '成员权限（你创建的文件夹内的文档）'}
             aria-label="设置成员权限"
           >
             <IconShield size={16} />
@@ -416,6 +418,11 @@ function AclDialog({ target, onClose, onSaved }) {
               「仅指定成员」时，仅下方授权的成员（含团队成员）可查看；文件夹的设置会向下作用于其子文件夹与文档，
               其中文档默认继承「可查看」，成员角色为 editor 时也继承「可编辑」。
             </p>
+            {target.type === 'folder' && (
+              <p className="mt-1 text-[11px] leading-relaxed text-white/25">
+                文件夹创建者对该文件夹及其子文件夹内的所有文档保有管理权（包含他人上传的文档）。
+              </p>
+            )}
           </div>
 
           <div>
