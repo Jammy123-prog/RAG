@@ -83,7 +83,9 @@ function UploadingCard({ name, startedAt }) {
 }
 
 function DocRow({ d, user, onOpen, onRemove, onAcl, delay }) {
-  const canDelete = d.can_edit ?? (user?.role === 'admin' || !d.owner || d.owner === user?.username)
+  const mine = !!d.owner && d.owner === user?.username
+  // 开放区里创建者对自己上传的文档天然可管理；无 owner 的历史文档只留给管理员
+  const canDelete = d.can_edit ?? (user?.role === 'admin' || mine)
   return (
     <div
       className="group flex items-center gap-4 rounded-[1.5rem] bg-white/[0.03] p-1.5 ring-1 ring-inset ring-white/[0.06] transition-all duration-700 ease-fluid animate-reveal hover:bg-white/[0.05] hover:ring-white/[0.1]"
@@ -120,11 +122,18 @@ function DocRow({ d, user, onOpen, onRemove, onAcl, delay }) {
           <span className="hidden shrink-0 rounded-full bg-sky-400/10 px-3 py-1 text-[11px] font-medium text-sky-300 ring-1 ring-inset ring-sky-400/25 sm:block">公有</span>
         )}
         {d.owner && (
-          <span className="hidden shrink-0 rounded-full bg-white/[0.05] px-2.5 py-1 text-[11px] text-white/40 ring-1 ring-inset ring-white/[0.08] md:block" title="文档创建者">
-            创建者 {d.owner}
+          <span
+            className={`hidden shrink-0 rounded-full px-2.5 py-1 text-[11px] ring-1 ring-inset md:block ${
+              mine
+                ? 'bg-aura/10 text-aura/90 ring-aura/25'
+                : 'bg-white/[0.05] text-white/40 ring-white/[0.08]'
+            }`}
+            title={mine ? '你创建的文档：可编辑、删除并配置成员权限' : `文档创建者：${d.owner}`}
+          >
+            创建者 {mine ? '我' : d.owner}
           </span>
         )}
-        {(user?.role === 'admin' || (d.owner && d.owner === user?.username)) && (
+        {(user?.role === 'admin' || mine) && (
           <button
             onClick={() => onAcl?.({ type: 'doc', id: d.doc_id, name: d.name, owner: d.owner })}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-white/20 transition-all duration-500 ease-fluid hover:bg-aura/10 hover:text-aura active:scale-90"
@@ -957,7 +966,7 @@ export default function KnowledgeView({ user, onStatsChange }) {
                           onAcl={setAclTarget}
                           user={user}
                         />
-                        {(user?.role === 'admin' || !f.owner || f.owner === user?.username) && currentFolderId === f.id && (
+                        {(user?.role === 'admin' || f.owner === user?.username) && currentFolderId === f.id && (
                           <button
                             onClick={() => removeFolder(f)}
                             className="absolute right-7 top-1.5 flex h-6 w-6 items-center justify-center rounded-md bg-black/40 text-red-300/70 transition-colors duration-300 hover:text-red-300"
@@ -1156,7 +1165,7 @@ export default function KnowledgeView({ user, onStatsChange }) {
                               </span>
                             </span>
                           </button>
-                          {(user?.role === 'admin' || !f.owner || f.owner === user?.username) && (
+                          {(user?.role === 'admin' || f.owner === user?.username) && (
                             <button
                               onClick={() => removeFolder(f)}
                               className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white/20 transition-all duration-500 ease-fluid hover:bg-red-400/10 hover:text-red-300 active:scale-90"
