@@ -7,6 +7,48 @@
 
 ---
 
+## v1.6.3 —— 启动命令封装为 scripts/kb.sh（2026-11-16）
+
+- 新增 `scripts/kb.sh`：`start | stop | restart | status | logs`，组件可选 `models | neo4j | backend | frontend | all`
+  - **幂等**：端口已通 / 健康检查通过则跳过，重复执行不会起两个进程
+  - **等就绪**：用 `/api/health`、`/v1/models`、端口监听判断，替代原来的固定 `sleep 5`
+  - **停止可靠**：PID 文件 → `pkill` 兜底 → 端口释放校验，避免端口被残留进程占住
+  - `status` 一屏显示四个组件的端口与健康；`start` 结束打印本机 + 局域网访问地址
+- `start_all.sh` 改为 `kb.sh start` 的薄封装，新增 `stop_all.sh`；PID 落 `logs/run/`，日志统一在 `logs/`
+- README「快速开始」补一键启停用法，原分步命令保留为手动排障方式
+
+---
+
+## v1.6.2 —— 支持 PPT/PPTX 入库 + 上传体积护栏（2026-11-13）
+
+- 新增 `.pptx / .ppt / .odp` 入库：LibreOffice 转 PDF 后按页提取文本，分片带 `@@PAGE_n@@` 页码标记，
+  命中引用可溯源到第几页；与 PDF 共用页面快照、内嵌图提取与逐页阅读器预览（实测 2 页 PPT：页码/图片/预览均正常）
+- 新增单文件上传上限 `MAX_UPLOAD_MB`（默认 200，`.env` 可调）：后端超限直接返回可读错误，
+  前端选中即拦截提示「xxx 超过单文件 200 MB 上限」，避免 1 GB 级 PPT 把转换进程拖死
+- 上传区状态行改为带结果状态（灰=已选择 / 绿=已入库 / 红=失败原因），格式不支持、体积超限、
+  转换失败都会持续显示在该行，不再只靠 4 秒 toast（此前 PPT 被跳过时表现为「选了但没上传」）
+- 上传区提示补充「单文件 ≤ 200 MB」
+
+---
+
+## v1.6.1 —— 旧版 Word（.doc / .wps）可直接上传（2026-11-13）
+
+- 修复「选择文件 → 选中文档 → 点打开后毫无反应」：根因是文件框的 `accept` 过滤——浏览器把扩展名列表转成 MIME 过滤，
+  识别不出类型的文件（`.doc`、网络盘上的文件等）会「能选中，点打开后被悄悄丢弃」，`change` 事件不触发；
+  现**去掉 `accept`**，改由前端 `handleFiles` 校验后缀并给出明确提示，提示文案统一为 `PDF · DOC · DOCX · MD · TXT · CSV · XLSX`
+- 上传触发改为 `<label>` 包 `<input>` 的原生方式（不再用 JS `input.click()`），兼容对 `display:none` 输入框点击无效的 WebView 环境
+- `change` 改为**原生事件监听**（`addEventListener`），不再依赖 React 合成事件；上传区下方新增选择链路状态行，
+  可区分「点开了选择框但浏览器没交回文件」与「文件已交给页面」，便于定位环境问题
+- 新增 `scripts/upload.sh`：命令行兜底上传（自动取管理员令牌调 `/api/documents/upload`），浏览器异常时也能批量入库
+- 后端 `ingestion.legacy_to_docx`：旧版 Word 先用 LibreOffice 无头转 `.docx` 再走统一解析（表格、文本框兜底逻辑复用）；
+  服务器缺 `soffice` 或转换失败时给出可读提示（建议另存为 `.docx`），不再静默失败
+- 新增 `ALLOWED_UPLOAD` / `FORMAT_HINT`，`/api/documents/upload` 的白名单与错误提示与前端保持一致
+- 预览：`.doc/.wps` 既支持 docx→HTML 内容预览，也纳入页面级（soffice 转 PDF 逐页出图）渲染
+- 前端上传前先校验后缀：全部不支持时直接提示；混合选择时上传支持的文件并提示跳过了哪些
+- `uploadDocuments` 不再吞掉 HTTP 错误：解析后端 `detail`，413 额外提示「文件过大」
+
+---
+
 ## v1.6 —— 文件夹创建者可管理文件夹内他人文档（2026-11-12）
 
 - `perms.doc_role` 新增规则：**文档所在文件夹（含任一祖先）的创建者对该文档直接是 `editor`**，

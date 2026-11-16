@@ -188,6 +188,16 @@ export async function uploadDocuments(files, scope = 'public', folderId = '') {
   fd.append('scope', scope)
   fd.append('folder_id', folderId || '')
   const res = await req('/api/documents/upload', { method: 'POST', body: fd })
+  if (!res.ok) {
+    let detail = ''
+    try {
+      detail = (await res.json()).detail || ''
+    } catch {
+      /* 非 JSON 响应（如网关 413） */
+    }
+    if (!detail && res.status === 413) detail = '文件过大，超出服务器上传限制'
+    throw new Error(detail || `服务端返回 ${res.status}`)
+  }
   return res.json()
 }
 

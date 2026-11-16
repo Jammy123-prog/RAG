@@ -177,9 +177,14 @@ def build_preview(info: dict) -> dict:
         return {**base, "kind": "pdf"}
     if exists and suffix in IMAGE_EXT:
         return {**base, "kind": "image"}
-    if exists and suffix == ".docx":
+    if exists and suffix in (".docx", ".doc", ".wps"):
         try:
-            return {**base, "kind": "html", "html": _docx_html(path)}
+            target = path
+            if suffix != ".docx":  # 旧版 Word 先转 docx 再出 HTML
+                from .ingestion import legacy_to_docx
+
+                target = legacy_to_docx(path)
+            return {**base, "kind": "html", "html": _docx_html(target)}
         except Exception as e:
             base["note"] = f"Word 解析失败：{e}"
     if exists and suffix == ".xlsx":
@@ -319,7 +324,7 @@ def ensure_pdf(info: dict) -> Path | None:
         if cached.exists() and stamp_file.exists() and stamp_file.read_text(encoding="utf-8") == stamp:
             return cached
         try:
-            if suffix in (".docx", ".xlsx", ".doc", ".xls"):
+            if suffix in (".docx", ".xlsx", ".doc", ".xls", ".wps", ".pptx", ".ppt", ".odp"):
                 result = _soffice_to_pdf(path, cached)
             else:
                 result = _story_to_pdf(_html_for_story(info, True, path, suffix), cached)

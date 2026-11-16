@@ -334,13 +334,26 @@ async def upload_documents(
             raise HTTPException(400, "文件夹归属与上传知识库不一致")
         if perms.Ctx().folder_role(folder, user) != perms.EDITOR:
             raise HTTPException(403, "没有向该文件夹上传文档的权限")
-    payloads = [(await f.read(), f.filename or "untitled") for f in files]
+    limit = max(1, settings.max_upload_mb) * 1024 * 1024
+    payloads: list[tuple[bytes, str]] = []
+    oversize: list[dict] = []
+    for f in files:
+        data = await f.read()
+        name = f.filename or "untitled"
+        if len(data) > limit:
+            oversize.append({
+                "name": name,
+                "error": f"文件 {len(data) / 1048576:.0f} MB，超过单文件上限 {settings.max_upload_mb} MB"
+                         "（超大 PPT/PDF 转换会超时），请拆分或先转成 PDF 再上传",
+            })
+            continue
+        payloads.append((data, name))
 
     def process(item: tuple[bytes, str]) -> dict:
         data, filename = item
         suffix = Path(filename).suffix.lower()
-        if suffix not in ingestion.SUPPORTED:
-            return {"errors": [{"name": filename, "error": f"不支持的格式 {suffix}（支持：pdf/docx/md/txt/csv/xlsx）"}]}
+        if suffix not in ingestion.ALLOWED_UPLOAD:
+            return {"errors": [{"name": filename, "error": f"不支持的格式 {suffix}（支持：{ingestion.FORMAT_HINT}）"}]}
         try:
             path = ingestion.save_upload(data, filename)
             return {"success": [ingestion.ingest_file(path, display_name=filename, owner=user["username"], scope=scope, folder_id=folder_id)]}
@@ -352,7 +365,7 @@ async def upload_documents(
 
     return {
         "success": [r for o in outs for r in o.get("success", [])],
-        "errors": [e for o in outs for e in o.get("errors", [])],
+        "errors": oversize + [e for o in outs for e in o.get("errors", [])],
     }
 
 

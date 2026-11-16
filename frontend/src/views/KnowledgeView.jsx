@@ -15,6 +15,12 @@ import {
 } from '../lib/api'
 import { IconUpload, IconDoc, IconTrash, IconShield } from '../components/icons.jsx'
 
+// 可上传后缀（与后端 ingestion.ALLOWED_UPLOAD 保持一致，含旧版 Word .doc/.wps）
+const ACCEPT_EXT = ['.pdf', '.doc', '.docx', '.wps', '.ppt', '.pptx', '.md', '.txt', '.csv', '.xlsx']
+const FORMAT_HINT = 'PDF / DOC / DOCX / PPT / PPTX / MD / TXT / CSV / XLSX'
+const MAX_UPLOAD_MB = 200
+const isAccepted = (name) => ACCEPT_EXT.some((ext) => (name || '').toLowerCase().endsWith(ext))
+
 const fmtSize = (b) => (b > 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`)
 
 const pad2 = (n) => String(n).padStart(2, '0')
@@ -646,8 +652,12 @@ export default function KnowledgeView({ user, onStatsChange }) {
   const [preview, setPreview] = useState(null)
   const [aclTarget, setAclTarget] = useState(null) // { type: 'folder'|'doc', id, name, owner }
   const inputRef = useRef(null)
+  const handleFilesRef = useRef(null)
   const statsRef = useRef(onStatsChange)
   statsRef.current = onStatsChange
+  // 上传诊断：openAt=点开选择框的时间，pickLog=浏览器本次交回来的文件（为空则说明浏览器没给文件）
+  const [openAt, setOpenAt] = useState(0)
+  const [pickLog, setPickLog] = useState(null) // { at, names, size }
 
   const refresh = useCallback(async () => {
     try {
@@ -689,6 +699,20 @@ export default function KnowledgeView({ user, onStatsChange }) {
     const t = setTimeout(() => setToast(null), 4000)
     return () => clearTimeout(t)
   }, [toast])
+
+  // 文件选择：直接监听原生 change 事件（不依赖 React 合成事件），
+  // 拿到文件后立即清空 value，保证再次选择同一文件仍能触发。
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    const onNativeChange = () => {
+      const picked = [...(el.files || [])]
+      el.value = ''
+      handleFilesRef.current?.(picked)
+    }
+    el.addEventListener('change', onNativeChange)
+    return () => el.removeEventListener('change', onNativeChange)
+  }, [])
 
   const folderMap = useMemo(() => Object.fromEntries(folders.map((f) => [f.id, f])), [folders])
   const scopeFolders = useMemo(() => folders.filter((f) => (f.scope || 'public') === scope), [folders, scope])
@@ -736,8 +760,30 @@ export default function KnowledgeView({ user, onStatsChange }) {
   const ungrouped = useMemo(() => docs.filter((d) => !d.folder_id), [docs])
 
   const handleFiles = async (fileList) => {
-    const files = [...fileList]
-    if (!files.length) return
+    const picked = [...(fileList || [])]
+    const total = picked.reduce((a, f) => a + (f.size || 0), 0)
+    const log = (state, text) => setPickLog({ at: Date.now(), state, text })
+    if (!picked.length) {
+      log('error', '浏览器没有把文件交回页面：请换 Chrome 重试，或先把文件下载到本地再选择')
+      setToast({ ok: false, text: '浏览器没有把文件交回页面，请重试或直接把文件拖进来' })
+      return
+    }
+    const tooBig = picked.filter((f) => f.size > MAX_UPLOAD_MB * 1024 * 1024)
+    if (tooBig.length) {
+      const msg = `${tooBig.map((f) => `${f.name}（${fmtSize(f.size)}）`).join('、')} 超过单文件 ${MAX_UPLOAD_MB} MB 上限，请拆分或先转成 PDF 再上传`
+      log('error', msg)
+      setToast({ ok: false, text: msg })
+      return
+    }
+    const files = picked.filter((f) => isAccepted(f.name))
+    const skipped = picked.filter((f) => !isAccepted(f.name))
+    if (!files.length) {
+      const msg = `${skipped.map((f) => f.name).join('、')}：格式不支持，目前可入库 ${FORMAT_HINT}`
+      log('error', msg)
+      setToast({ ok: false, text: msg })
+      return
+    }
+    log('picked', `已选择 ${files.length} 个文件：${files.map((f) => f.name).join('、')}（${fmtSize(total)}），开始上传…`)
     const target = currentFolderId || ''
     const startedAt = Date.now()
     setUploadStartedAt(startedAt)
@@ -746,21 +792,29 @@ export default function KnowledgeView({ user, onStatsChange }) {
       const res = await uploadDocuments(files, scope, target)
       if (res.success?.length) {
         const seconds = ((Date.now() - startedAt) / 1000).toFixed(1)
-        setToast({
-          ok: true,
-          text: `已入库 ${res.success.length} 份文档，共 ${res.success.reduce((a, d) => a + d.chunks, 0)} 个知识分片 · ${fmtClock(startedAt)} 上传 · 耗时 ${seconds}s`,
-        })
+        const text = `已入库 ${res.success.length} 份文档，共 ${res.success.reduce((a, d) => a + d.chunks, 0)} 个知识分片 · ${fmtClock(startedAt)} 上传 · 耗时 ${seconds}s`
+        log('ok', text)
+        setToast({ ok: true, text })
       }
       if (res.errors?.length) {
-        setToast({ ok: false, text: res.errors.map((e) => `${e.name}：${e.error}`).join('；') })
+        const text = res.errors.map((e) => `${e.name}：${e.error}`).join('；')
+        log('error', text)
+        setToast({ ok: false, text })
+      } else if (skipped.length) {
+        const text = `已跳过 ${skipped.map((f) => f.name).join('、')}：格式不支持（可入库 ${FORMAT_HINT}）`
+        log('error', text)
+        setToast({ ok: false, text })
       }
-    } catch {
-      setToast({ ok: false, text: '上传失败，请确认后端服务已启动' })
+    } catch (e) {
+      const text = e?.message ? `上传失败：${e.message}` : '上传失败，请确认后端服务已启动'
+      log('error', text)
+      setToast({ ok: false, text })
     } finally {
       setUploading([])
       refresh()
     }
   }
+  handleFilesRef.current = handleFiles // 供原生 change 监听调用
 
   const remove = async (id, name) => {
     try {
@@ -1100,28 +1154,50 @@ export default function KnowledgeView({ user, onStatsChange }) {
                   }`}>
                     {scope === 'public' ? '公有' : '个人'}
                   </span>
-                  / {uploadTargetLabel} · 支持 PDF · DOCX · MD · TXT · CSV · XLSX
+                  / {uploadTargetLabel} · 支持 {FORMAT_HINT.replaceAll(' / ', ' · ')} · 单文件 ≤ {MAX_UPLOAD_MB} MB
                 </p>
               </div>
-              <button
-                onClick={() => inputRef.current?.click()}
-                className="shrink-0 rounded-full bg-white/[0.07] px-4 py-2 text-[12.5px] text-white/75 ring-1 ring-inset ring-white/[0.1] transition-all duration-500 ease-fluid hover:bg-white/[0.12] hover:text-white active:scale-[0.97]"
+              {/* 用 label 包住 input：原生触发文件选择框，不依赖 JS .click()，
+                  在部分内嵌/WebView 浏览器（对 display:none 的 input 调 click 无效）里也能弹出。
+                  刻意不设 accept：部分浏览器把扩展名列表转成 MIME 过滤，遇到识别不出的文件（.doc/网络盘）
+                  会「能选中但点打开后被悄悄丢弃」，change 事件不触发，表现为点了毫无反应。
+                  格式校验改由 handleFiles 在前端做，并给出明确提示。 */}
+              <label
+                onClick={() => {
+                  setOpenAt(Date.now())
+                  setPickLog(null)
+                }}
+                className="inline-flex shrink-0 cursor-pointer items-center justify-center rounded-full bg-white/[0.07] px-4 py-2 text-[12.5px] text-white/75 ring-1 ring-inset ring-white/[0.1] transition-all duration-500 ease-fluid hover:bg-white/[0.12] hover:text-white active:scale-[0.97]"
               >
                 选择文件
-              </button>
-              <input
-                ref={inputRef}
-                type="file"
-                multiple
-                accept=".pdf,.docx,.md,.txt,.csv,.xlsx"
-                className="hidden"
-                onChange={(e) => {
-                  handleFiles(e.target.files)
-                  e.target.value = ''
-                }}
-              />
+                <input ref={inputRef} type="file" multiple className="sr-only" />
+              </label>
             </div>
           </div>
+
+          {/* 选择链路状态：能看出是「点开了选择框没拿到文件」还是「文件已交给页面」 */}
+          {(openAt > 0 || pickLog) && (
+            <div className="mt-3 flex items-start gap-2 px-1 text-[11.5px] leading-relaxed">
+              <span
+                className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${
+                  pickLog?.state === 'ok' ? 'bg-emerald-400/70' : pickLog?.state === 'error' ? 'bg-red-400/70' : 'bg-white/25'
+                }`}
+              />
+              <span
+                className={
+                  pickLog?.state === 'ok'
+                    ? 'text-emerald-300/80'
+                    : pickLog?.state === 'error'
+                      ? 'text-red-300/80'
+                      : 'text-white/35'
+                }
+              >
+                {pickLog
+                  ? `${fmtClock(pickLog.at)} · ${pickLog.text}`
+                  : `已在 ${fmtClock(openAt)} 打开文件选择框，但页面没收到文件（取消选择会这样；若确实选了文件，请换 Chrome，或先把文件下载到本地再选）`}
+              </span>
+            </div>
+          )}
 
           {uploading.length > 0 && (
             <div className="mt-4 grid gap-3">

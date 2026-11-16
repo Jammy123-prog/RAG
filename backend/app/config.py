@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     chroma_dir: str = str(DATA_DIR / "chroma")
     chunk_size: int = 500
     chunk_overlap: int = 80
+    max_upload_mb: int = 200           # 单文件上传上限（过大的 PPT/PDF 转换会拖死服务，前端同值校验）
     top_k: int = 6
     sim_threshold: float = 0.35        # 检索召回阈值：低于此分的分片不进入上下文
     strong_hit_threshold: float = 0.5  # 强命中阈值：最高分仍低于此值视为弱命中（误命中），回退模型兜底

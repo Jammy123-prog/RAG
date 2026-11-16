@@ -44,7 +44,25 @@
 
 ## 快速开始
 
-### 1. 启动模型服务（已完成部署的机器直接运行）
+### 一键启停（推荐）
+
+```bash
+bash scripts/kb.sh start              # 全部：模型(:8000/:8001) → Neo4j(:7687) → 后端(:8010) → 前端(:5173)
+bash scripts/kb.sh status             # 各组件端口 / 健康 / PID
+bash scripts/kb.sh restart backend    # 只重启某个组件（models|neo4j|backend|frontend）
+bash scripts/kb.sh stop               # 全部停止
+bash scripts/kb.sh logs backend       # 跟踪日志（models / embed / neo4j / backend / frontend）
+```
+
+- **幂等**：已在运行或端口已通的组件自动跳过，重复执行不会起两个进程
+- **等就绪**：按 `/api/health`、`/v1/models`、端口监听判断，不用手动 sleep
+- **留痕**：PID 在 `logs/run/`，日志在 `logs/`（backend.log / frontend.log / vllm_*.log）
+- 启动结束会打印本机与局域网访问地址（局域网地址供其它机器/手机访问）
+
+> 兼容旧入口：`scripts/start_all.sh`（= `kb.sh start`）、`scripts/stop_all.sh`（= `kb.sh stop`）。
+> 以下 1)~3) 为手动分步方式，等价于一键启动，便于排障时逐段验证。
+
+### 手动 1) 启动模型服务（已完成部署的机器直接运行）
 
 ```bash
 bash scripts/start_models.sh     # Qwen3-14B-AWQ → :8000，bge-m3 → :8001（单卡 16GB 显存分配 85%+12%）
@@ -65,7 +83,7 @@ conda install -n RAG-vllm ninja -y
 > 故改用 **vLLM + ModelScope** 路线，效果等价且吞吐更高。若换用 Ollama，将 `.env` 的
 > `LLM_BASE_URL/EMBED_BASE_URL` 指向 `http://localhost:11434/v1` 并 `ollama pull qwen3:14b bge-m3` 即可。
 
-### 2. 启动后端（conda 环境 `RAG`，Python 3.10 + Node 20）
+### 手动 2) 启动后端（conda 环境 `RAG`，Python 3.10 + Node 20）
 
 ```bash
 cd RAG
@@ -75,7 +93,7 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple   # 
 uvicorn backend.app.main:app --host 0.0.0.0 --port 8010
 ```
 
-### 3. 启动前端
+### 手动 3) 启动前端
 
 ```bash
 cd frontend

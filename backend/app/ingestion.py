@@ -1,11 +1,13 @@
 """文档入库流水线：加载 → 中文友好切分 → bge-m3 向量化 → Chroma 入库。
 
-支持 pdf / docx / md / txt / csv / xlsx，参照 RAGFlow 切片策略与 langchain-chatchat 加载器。
+支持 pdf / doc / docx / md / txt / csv / xlsx，参照 RAGFlow 切片策略与 langchain-chatchat 加载器。
+旧版 Word（.doc/.wps）先用 LibreOffice 无头转 docx 再统一解析。
 扫描件 PDF（提不出文本）自动调用 PaddleOCR PP-OCRv6 兜底（paddle 环境 subprocess）。
 """
 import io
 import os
 import re
+import shutil
 import subprocess
 import uuid
 from pathlib import Path
@@ -19,6 +21,13 @@ from . import auth, vectorstore
 from .config import BASE_DIR, DATA_DIR, UPLOAD_DIR, settings
 
 SUPPORTED = {".pdf", ".docx", ".md", ".txt", ".csv", ".xlsx"}
+# 旧版 Word 二进制格式（Word 97-2003 / WPS 文字）：需先转 docx
+LEGACY_WORD = {".doc", ".wps"}
+# 演示/汇报用 PPT：LibreOffice 转 PDF 后按页提取文本，页码可直接溯源
+SLIDES = {".pptx", ".ppt", ".odp"}
+# 允许上传的全部后缀
+ALLOWED_UPLOAD = SUPPORTED | LEGACY_WORD | SLIDES
+FORMAT_HINT = "PDF / DOC / DOCX / PPT / PPTX / MD / TXT / CSV / XLSX"
 
 # 中文优先的切分分隔符（参照 Dify / FastGPT 中文切片实践）
 _SEPARATORS = ["\n\n", "\n", "。", "！", "？", "；", "，", " ", ""]
@@ -116,6 +125,39 @@ def _ocr_pdf(path: Path, pages: list[int]) -> dict[int, str]:
     return result
 
 
+def _soffice_convert(src: Path, target_ext: str, timeout: int = 600) -> Path:
+    """LibreOffice 无头转换：src → target_ext（docx / pdf），返回产物路径。"""
+    soffice = shutil.which("soffice") or shutil.which("libreoffice")
+    if not soffice:
+        raise ValueError(
+            f"服务器未安装 LibreOffice，无法解析 {src.suffix}，请另存为 PDF 或 DOCX 后重新上传"
+        )
+    out_dir = src.parent / "_converted"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        proc = subprocess.run(
+            [soffice, "--headless", "--norestore", "--convert-to", target_ext,
+             "--outdir", str(out_dir), str(src)],
+            capture_output=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise ValueError(f"{src.suffix} 转换超时（文件过大或页数过多），建议先转成 PDF 再上传") from e
+    except Exception as e:
+        raise ValueError(f"{src.suffix} 转换失败：{e}") from e
+    target = out_dir / f"{src.stem}.{target_ext}"
+    if not target.exists():
+        msg = (proc.stderr or proc.stdout or b"").decode("utf-8", "ignore").strip()[:120]
+        raise ValueError(
+            f"{src.suffix} 转换失败{('：' + msg) if msg else ''}，请另存为 PDF 或 DOCX 后重新上传"
+        )
+    return target
+
+
+def legacy_to_docx(path: Path) -> Path:
+    """旧版 Word（.doc/.wps）→ .docx：之后走统一 docx 解析。"""
+    return _soffice_convert(path, "docx", timeout=180)
+
+
 def _load_docx(path: Path) -> str:
     """docx 解析：段落 + 表格（会议纪要等文档内容常在表格中）+ 文本框 XML 兜底。"""
     import docx
@@ -140,6 +182,15 @@ def _load_docx(path: Path) -> str:
     return "\n".join(parts)
 
 
+def _load_slides(path: Path, doc_id: str | None = None) -> str:
+    """PPT / PPTX / ODP：LibreOffice 转 PDF 后按页提取文本。
+
+    转 PDF 的好处是一次走通 PDF 的页码标记、页面快照与逐页预览，命中时能溯源到第几页。
+    """
+    pdf = _soffice_convert(path, "pdf", timeout=900)
+    return _load_pdf(pdf, doc_id)
+
+
 def _load_table(path: Path) -> str:
     if path.suffix == ".csv":
         rows = path.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -156,6 +207,10 @@ def load_text(path: Path, doc_id: str | None = None) -> str:
         text = _load_pdf(path, doc_id)
     elif suffix == ".docx":
         text = _load_docx(path)
+    elif suffix in LEGACY_WORD:  # 旧版 Word：先转 docx
+        text = _load_docx(legacy_to_docx(path))
+    elif suffix in SLIDES:  # PPT：转 PDF 后按页取文本
+        text = _load_slides(path, doc_id)
     elif suffix in {".csv", ".xlsx"}:
         text = _load_table(path)
     else:  # md / txt
@@ -260,8 +315,16 @@ def ingest_file(
     if not docs:
         raise ValueError(f"文档「{name}」未能生成有效知识分片")
     vectorstore.add_documents(docs)
-    n_images = _extract_pdf_images(path, doc_id) if path.suffix.lower() == ".pdf" else 0
-    if path.suffix.lower() == ".pdf":  # 含页面快照（矢量图纸页）
+    # PDF 直接取内嵌图；PPT 取转出 PDF 的内嵌图；两者都带页面快照（矢量图纸页）
+    suffix = path.suffix.lower()
+    pdf_src: Path | None = None
+    if suffix == ".pdf":
+        pdf_src = path
+    elif suffix in SLIDES:
+        candidate = path.parent / "_converted" / f"{path.stem}.pdf"
+        pdf_src = candidate if candidate.exists() else None
+    n_images = _extract_pdf_images(pdf_src, doc_id) if pdf_src else 0
+    if pdf_src:
         n_images += len(list((IMAGES_DIR / doc_id).glob("*_snapshot.png")))
     info = vectorstore.register_document(
         name,
