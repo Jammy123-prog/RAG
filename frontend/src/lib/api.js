@@ -251,13 +251,21 @@ export async function fetchDocumentPageBlobUrl(docId, pageNo, scale = 2) {
 
 // ---------------- 知识图谱 ----------------
 
-export async function fetchKgGraph() {
-  const res = await req('/api/kg/graph')
+/** 图谱数据：folderId 为空=全库，`__unfiled__`=未分组，其他=该文件夹及子文件夹 */
+export async function fetchKgGraph({ folderId = '', includeExternal = true } = {}) {
+  const p = new URLSearchParams()
+  if (folderId) p.set('folder_id', folderId)
+  p.set('include_external', includeExternal ? 'true' : 'false')
+  const res = await req(`/api/kg/graph?${p}`)
   return res.json()
 }
 
-export async function buildKgGraph() {
-  const res = await req('/api/kg/build', { method: 'POST' })
+/** 构建图谱：带 folderId 时只重建该文件夹子树 */
+export async function buildKgGraph(folderId = '') {
+  const p = new URLSearchParams()
+  if (folderId) p.set('folder_id', folderId)
+  const qs = p.toString()
+  const res = await req(`/api/kg/build${qs ? `?${qs}` : ''}`, { method: 'POST' })
   if (!res.ok) throw new Error((await res.json()).detail || '构建请求失败')
   return res.json()
 }

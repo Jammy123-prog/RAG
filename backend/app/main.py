@@ -686,20 +686,44 @@ async def put_acl(form: AclForm, user: dict = Depends(get_user)):
 # ==================== 知识图谱（Neo4j，新增模块） ====================
 
 @app.get("/api/kg/graph")
-async def kg_graph(include_entities: bool = True, user: dict = Depends(get_user)):
-    """知识图谱可视化数据（ECharts graph：nodes/links），按成员可见范围过滤。"""
-    return kg.get_graph(include_entities=include_entities, visible=_visible_doc_ids(user))
+async def kg_graph(
+    include_entities: bool = True,
+    folder_id: str = "",
+    include_external: bool = True,
+    user: dict = Depends(get_user),
+):
+    """知识图谱可视化数据（ECharts graph：nodes/links），按成员可见范围过滤。
+
+    folder_id 为空=全库；`__unfiled__`=未分组；其他=该文件夹及其子文件夹（同目录关联更密）。
+    """
+    return kg.get_graph(
+        include_entities=include_entities,
+        visible=_visible_doc_ids(user),
+        folder_id=(folder_id.strip() or None),
+        include_external=include_external,
+    )
 
 
 @app.post("/api/kg/build")
-async def kg_build(user: dict = Depends(get_user)):
-    """后台重建知识图谱：逐文档 LLM 抽取实体 + 生成文档关联（仅管理员）。"""
+async def kg_build(folder_id: str = "", user: dict = Depends(get_user)):
+    """后台构建知识图谱（仅管理员）：逐文档 LLM 抽取实体 + 生成文档关联。
+
+    folder_id 为空=全量重建；指定文件夹=只重建该文件夹子树，其他文件夹的图谱保持不动。
+    """
     require_admin(user)
     if not kg.available():
         raise HTTPException(503, "Neo4j 未连接，请先启动：docker compose up -d neo4j")
-    if not kg.start_build_async():
+    fid = folder_id.strip() or None
+    if fid and fid != kg.UNFILED:
+        folders = {f["id"]: f for f in vectorstore.list_folders()}
+        if fid not in folders:
+            raise HTTPException(404, "目标文件夹不存在")
+        scope = kg.scope_label(fid, folders)
+    else:
+        scope = kg.scope_label(fid)
+    if not kg.start_build_async(fid):
         raise HTTPException(409, "图谱构建进行中，请稍候")
-    return {"ok": True, "message": "已开始构建知识图谱"}
+    return {"ok": True, "scope": scope, "message": f"已开始构建「{scope}」的知识图谱"}
 
 
 @app.get("/api/kg/entities")

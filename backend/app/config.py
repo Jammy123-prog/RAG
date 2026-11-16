@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     kg_entities_per_doc: int = 12  # 每份文档抽取的实体/概念数上限
     kg_sample_chunks: int = 8      # 每份文档参与抽取的分片采样数
     kg_max_entity_nodes: int = 60  # 可视化返回的实体节点数上限（按关联文档数排序）
+    kg_scope_external_docs: int = 8  # 按文件夹看图时，额外引入的「关联文件夹」文档数上限（按共享实体数排序）
     kg_enhance: bool = True             # 图增强检索：问题命中实体 → 邻居文档参与召回（RRF 融合）
     kg_graph_max_docs: int = 3          # 图增强时最多补充的邻居文档数
     kg_graph_chunks_per_doc: int = 2    # 每个邻居文档补充的分片数

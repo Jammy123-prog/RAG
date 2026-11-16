@@ -1,9 +1,11 @@
 """知识图谱模块（新增）：Neo4j 存储 + LLM 实体抽取 + 文档关联可视化数据服务。
 
-参照 GraphRAG / RAGFlow Knowledge Graph 的轻量落地：
+参照 GraphRAG / RAGFlow Knowledge Graph / Neo4j Bloom 的轻量落地：
 - 抽取：每份文档采样若干分片，一次 LLM 调用抽取核心实体/概念（严格 JSON 数组输出）
-- 建图：(:Document {doc_id})-[:MENTIONS {weight}]->(:Entity {name})
+- 建图：(:Document {doc_id, folder_id})-[:MENTIONS {weight}]->(:Entity {name})
         共享实体的文档对之间生成 (:Document)-[:RELATED {shared}]->(:Document)
+- 范围：支持按知识库文件夹（含子文件夹）**局部重建**与**局部查看**，
+        同文件夹内文档关联更密；被别人文件夹也提及的实体标记为 bridge（桥接实体）
 - 服务：/api/kg/graph 返回 ECharts graph 所需的 nodes/links 数据
 - 容错：Neo4j 未启动时 available=false，前端给出部署提示，不影响其他功能
 """
@@ -17,6 +19,9 @@ from .config import DATA_DIR, settings
 
 _driver = None  # neo4j.Driver，惰性创建
 _status = {"state": "idle", "done": 0, "total": 0, "message": ""}  # idle/running/done/error
+
+# 图谱范围的伪文件夹 id：未分组（根目录、没有归属文件夹）的文档
+UNFILED = "__unfiled__"
 
 # 分片中的页码标记（ingestion 切分时写入），详情片段展示前剔除
 _PAGE_RE = re.compile(r"@@PAGE_\d+@@")
@@ -150,30 +155,105 @@ def _doc_chunks_text(doc_id: str) -> str:
         return ""
 
 
+# ---------------- 文件夹范围（图谱按文件夹构建/查看） ----------------
+
+def _folder_index() -> dict:
+    return {f["id"]: f for f in vectorstore.list_folders()}
+
+
+def subtree_ids(root: str, folders: dict | None = None) -> set[str]:
+    """root 及其全部后代文件夹 id（同级外的分支不受影响）。"""
+    folders = folders if folders is not None else _folder_index()
+    ids, changed = {root}, True
+    while changed:
+        changed = False
+        for fid, f in folders.items():
+            if fid not in ids and f.get("parent_id") in ids:
+                ids.add(fid)
+                changed = True
+    return ids
+
+
+def in_scope(doc: dict, folder_id: str | None, subtree: set[str] | None) -> bool:
+    """文档是否落在图谱范围内：None=全库；UNFILED=未分组；否则按文件夹子树。"""
+    if not folder_id:
+        return True
+    fid = doc.get("folder_id") or ""
+    if folder_id == UNFILED:
+        return not fid
+    return fid in (subtree or set())
+
+
+def folder_path(folder_id: str, folders: dict | None = None) -> str:
+    """文件夹全路径名（父 / 子），用于页面上的范围说明。"""
+    folders = folders if folders is not None else _folder_index()
+    names, cur, guard = [], folder_id, 0
+    while cur and guard < 32:
+        f = folders.get(cur)
+        if not f:
+            break
+        names.append(f.get("name") or cur)
+        cur = f.get("parent_id")
+        guard += 1
+    return " / ".join(reversed(names)) or folder_id
+
+
+def scope_label(folder_id: str | None, folders: dict | None = None) -> str:
+    if not folder_id:
+        return "全部文档"
+    if folder_id == UNFILED:
+        return "未分组文档"
+    return folder_path(folder_id, folders)
+
+
 # ---------------- 建图 ----------------
 
-def build_graph() -> None:
-    """全量重建：清空后逐文档抽取实体写入 Neo4j，再生成文档间 RELATED 关联。"""
+def build_graph(folder_id: str | None = None) -> None:
+    """构建图谱。
+
+    - folder_id 为空：全量重建（清空后逐文档抽取）
+    - 指定文件夹：只重建该文件夹子树内文档的节点与实体，其他文件夹不动，
+      因此被别人文件夹共享的实体自然成为跨文件夹「桥接」，而不是被覆盖。
+    """
     global _status
-    _status = {"state": "running", "done": 0, "total": 0, "message": ""}
+    folders = _folder_index()
+    subtree = None
+    if folder_id and folder_id != UNFILED:
+        if folder_id not in folders:
+            _status = {"state": "error", "done": 0, "total": 0, "message": "目标文件夹不存在"}
+            return
+        subtree = subtree_ids(folder_id, folders)
+    target = scope_label(folder_id, folders)
+    _status = {
+        "state": "running", "done": 0, "total": 0, "message": "",
+        "scope": {"folder_id": folder_id or "", "label": target},
+    }
     try:
-        docs = vectorstore.list_documents()
+        docs = [d for d in vectorstore.list_documents() if in_scope(d, folder_id, subtree)]
         _status["total"] = len(docs)
         entities_map = _extract_all(docs)  # LLM 抽取阶段（单事件循环）
+        ids = [d["doc_id"] for d in docs]
         with _get_driver().session() as session:
-            session.run("MATCH (n) DETACH DELETE n")  # 全量重建
+            if not folder_id:
+                session.run("MATCH (n) DETACH DELETE n")  # 全量重建
+            elif ids:
+                # 局部重建：只摘掉本范围内的文档节点，重新抽取后写回
+                session.run("MATCH (d:Document) WHERE d.doc_id IN $ids DETACH DELETE d", ids=ids)
             for d in docs:
                 entities = entities_map.get(d["doc_id"], [])
                 session.run(
                     """
                     MERGE (doc:Document {doc_id: $doc_id})
-                    SET doc.name = $name, doc.owner = $owner, doc.scope = $scope, doc.chunks = $chunks
+                    SET doc.name = $name, doc.owner = $owner, doc.scope = $scope,
+                        doc.chunks = $chunks, doc.folder_id = $folder_id
                     """,
                     doc_id=d["doc_id"], name=d["name"], owner=d.get("owner"),
                     scope=d.get("scope", "public"), chunks=d.get("chunks", 0),
+                    folder_id=d.get("folder_id") or "",
                 )
                 for e in entities:
                     # 实体归一化：与已有实体做大小写无关/包含匹配，复用规范名
+                    # （跨文件夹复用 = 知识在文件夹之间连成桥）
                     canonical = session.run(
                         """
                         MATCH (ent:Entity)
@@ -196,28 +276,25 @@ def build_graph() -> None:
                     )
                 _status["done"] += 1
             # 文档关联：共享 >=1 个实体即 RELATED，shared 为共享实体数
-            session.run(
-                """
-                MATCH (a:Document)-[:MENTIONS]->(e:Entity)<-[:MENTIONS]-(b:Document)
-                WHERE a.doc_id < b.doc_id
-                WITH a, b, count(e) AS shared
-                MERGE (a)-[r:RELATED]->(b)
-                SET r.shared = shared
-                """
-            )
-        _status = {"state": "done", "done": _status["done"], "total": _status["total"],
-                   "message": f"已为 {_status['done']} 份文档构建图谱"}
+            _rebuild_related(session)
+            _purge_orphan_entities(session)
+        _status = {
+            "state": "done", "done": _status["done"], "total": _status["total"],
+            "message": f"已在「{target}」内为 {_status['done']} 份文档构建图谱",
+            "scope": {"folder_id": folder_id or "", "label": target},
+        }
     except Exception as e:
-        _status = {"state": "error", "done": 0, "total": 0, "message": str(e)[:300]}
+        _status = {"state": "error", "done": 0, "total": 0, "message": str(e)[:300],
+                   "scope": {"folder_id": folder_id or "", "label": target}}
 
 
-def start_build_async() -> bool:
-    """后台线程触发构建；已有构建进行中则忽略，返回是否成功启动。"""
+def start_build_async(folder_id: str | None = None) -> bool:
+    """后台线程触发构建（可指定文件夹范围）；已有构建进行中则忽略，返回是否成功启动。"""
     if _status["state"] == "running":
         return False
     if not available():
         return False
-    threading.Thread(target=build_graph, daemon=True).start()
+    threading.Thread(target=build_graph, args=(folder_id,), daemon=True).start()
     return True
 
 
@@ -241,13 +318,35 @@ def _rebuild_related(session) -> None:
     )
 
 
-def _purge_stale(session, keep_ids: list[str]) -> None:
-    """清理知识库中已不存在的文档节点与孤立实体（删除联动兜底）。"""
+def _purge_orphan_entities(session) -> None:
+    """清理没有任何文档提及的孤立实体（局部重建后旧实体名会残留）。"""
+    session.run("MATCH (e:Entity) WHERE NOT (()-[:MENTIONS]->(e)) DELETE e")
+
+
+def _sync_folders(session, reg: list[dict]) -> None:
+    """把文档的当前文件夹归属回填到图节点（老数据没有 folder_id，或文档被移动过）。"""
+    rows = [{"id": d["doc_id"], "folder_id": d.get("folder_id") or ""} for d in reg]
+    if not rows:
+        return
+    session.run(
+        """
+        UNWIND $rows AS row
+        MATCH (d:Document {doc_id: row.id})
+        WHERE coalesce(d.folder_id, '') <> row.folder_id
+        SET d.folder_id = row.folder_id
+        """,
+        rows=rows,
+    )
+
+
+def _purge_stale(session, reg: list[dict]) -> None:
+    """清理知识库中已不存在的文档节点与孤立实体（删除联动兜底），并回填文件夹归属。"""
     session.run(
         "MATCH (d:Document) WHERE NOT d.doc_id IN $ids DETACH DELETE d",
-        ids=keep_ids,
+        ids=[d["doc_id"] for d in reg],
     )
     session.run("MATCH (e:Entity) WHERE NOT (()-[:MENTIONS]->(e)) DELETE e")
+    _sync_folders(session, reg)
     _rebuild_related(session)
 
 
@@ -275,78 +374,188 @@ def _doc_ids(visible: set[str] | None) -> list[str]:
     return [d["doc_id"] for d in vectorstore.list_documents()]
 
 
-def get_graph(include_entities: bool = True, visible: set[str] | None = None) -> dict:
-    """返回 ECharts graph 数据：nodes/links + 构建状态 + Neo4j 可用性。
+def get_graph(
+    include_entities: bool = True,
+    visible: set[str] | None = None,
+    folder_id: str | None = None,
+    include_external: bool = True,
+) -> dict:
+    """返回 ECharts graph 数据：nodes/links + 构建状态 + 范围（scope）元信息。
 
     visible: 当前用户可见的 doc_id 集合（None = 全部）；不可见文档及其实体边不返回。
+    folder_id: 图谱范围。空 = 全库；UNFILED = 未分组文档；其他 = 该文件夹及其子文件夹。
+    include_external: 选了文件夹时，是否把「关联文件夹」里一跳的文档也画进来（跨文件夹桥接）。
+
+    scope 里除了展示用的标签，还给出对账数字（范围内文档 / 已入图 / 待构建 / 桥接实体），
+    便于页面上直接讲清「这个文件夹的图谱正在覆盖哪些资料」。
     """
-    result = {"available": available(), "status": build_status(), "nodes": [], "links": []}
+    folders = _folder_index()
+    subtree = None
+    if folder_id and folder_id != UNFILED:
+        subtree = subtree_ids(folder_id, folders) if folder_id in folders else set()
+    label = scope_label(folder_id, folders)
+    result = {
+        "available": available(),
+        "status": build_status(),
+        "nodes": [],
+        "links": [],
+        "scope": {
+            "folder_id": folder_id or "",
+            "label": label,
+            "folder_path": label,
+            "subfolder_count": max(0, len(subtree) - 1) if subtree else 0,
+            "include_external": include_external,
+            "registry_documents": 0,
+            "documents": 0,
+            "pending": 0,
+            "external_documents": 0,
+            "external_documents_total": 0,
+            "entities": 0,
+            "related": 0,
+            "cross_links": 0,
+            "bridge_entities": 0,
+        },
+    }
+    reg = vectorstore.list_documents()
+    reg_scope = [
+        d for d in reg
+        if in_scope(d, folder_id, subtree) and (visible is None or d["doc_id"] in visible)
+    ]
+    result["scope"]["registry_documents"] = len(reg_scope)
+
     if not result["available"] or _status["state"] == "running":
         return result
+    session = None
     try:
-        with _get_driver().session() as session:
-            # 与知识库 registry 对账：清理已删除文档的残留节点（保证两套库数量一致）
-            _purge_stale(session, [d["doc_id"] for d in vectorstore.list_documents()])
-            docs = session.run(
-                "MATCH (d:Document) RETURN d.doc_id AS id, d.name AS name, d.owner AS owner, "
-                "d.scope AS scope, d.chunks AS chunks, "
-                "[(d)-[:MENTIONS]->(e) | e.name] AS entities"
+        session = _get_driver().session()
+        # 与知识库 registry 对账：清理已删除文档的残留节点（保证两套库数量一致）
+        _purge_stale(session, reg)
+        docs = session.run(
+            "MATCH (d:Document) RETURN d.doc_id AS id, d.name AS name, d.owner AS owner, "
+            "d.scope AS scope, d.chunks AS chunks, d.folder_id AS folder_id, "
+            "[(d)-[:MENTIONS]->(e) | e.name] AS entities"
+        ).data()
+        rels = session.run(
+            "MATCH (a:Document)-[r:RELATED]->(b:Document) "
+            "RETURN a.doc_id AS s, b.doc_id AS t, r.shared AS shared"
+        ).data()
+
+        if visible is not None:
+            docs = [d for d in docs if d["id"] in visible]
+            rels = [r for r in rels if r["s"] in visible and r["t"] in visible]
+        by_id = {d["id"]: d for d in docs}
+
+        scoped = [d for d in docs if in_scope(d, folder_id, subtree)]
+        scope_ids = {d["id"] for d in scoped}
+
+        # 跨文件夹：范围外但与范围内文档共享实体的邻居（按共享实体数取前 N）
+        external: list[dict] = []
+        if folder_id:
+            weight: dict[str, int] = {}
+            for r in rels:
+                s, t = r["s"], r["t"]
+                if s in scope_ids and t not in scope_ids:
+                    weight[t] = weight.get(t, 0) + (r.get("shared") or 1)
+                elif t in scope_ids and s not in scope_ids:
+                    weight[s] = weight.get(s, 0) + (r.get("shared") or 1)
+            result["scope"]["external_documents_total"] = len(weight)
+            if include_external:
+                ranked = sorted(weight.items(), key=lambda kv: kv[1], reverse=True)
+                for did, w in ranked[: settings.kg_scope_external_docs]:
+                    if did in by_id:
+                        external.append({**by_id[did], "shared_links": w})
+        ext_ids = {d["id"] for d in external}
+        shown_ids = scope_ids | ext_ids
+
+        def _folder_name(fid: str | None) -> str:
+            return (folders.get(fid or "") or {}).get("name") or ""
+
+        def _doc_node(d: dict, category: int) -> dict:
+            return {
+                "id": d["id"],
+                "name": d["name"],
+                "category": category,
+                "owner": d.get("owner"),
+                "scope": d.get("scope", "public"),
+                "chunks": d.get("chunks", 0),
+                "folder_id": d.get("folder_id") or "",
+                "folder": _folder_name(d.get("folder_id")),
+                "in_scope": category == 0,
+                "shared_links": d.get("shared_links", 0),
+                "symbolSize": min(26 + len(d.get("entities") or []) * 4, 52) - (0 if category == 0 else 8),
+            }
+
+        nodes = [_doc_node(d, 0) for d in scoped] + [_doc_node(d, 2) for d in external]
+        links: list[dict] = []
+
+        if include_entities and shown_ids:
+            # 实体：先按「出现在范围内文档的度数」选节点，再算它被范围外文档提及的次数
+            # sdeg = 范围内提及它的文档数；total - sdeg = 范围外文档数（>0 即桥接实体）
+            ents = session.run(
+                """
+                MATCH (e:Entity)<-[:MENTIONS]-(d:Document)
+                WHERE d.doc_id IN $ids
+                WITH e, count(DISTINCT d) AS deg
+                ORDER BY deg DESC, e.name LIMIT $limit
+                MATCH (e)<-[:MENTIONS]-(all:Document)
+                WITH e, deg, collect(DISTINCT all.doc_id) AS all_ids
+                RETURN e.name AS name, deg, all_ids,
+                       size([x IN all_ids WHERE x IN $scope]) AS sdeg
+                """,
+                ids=list(shown_ids), scope=list(scope_ids), limit=settings.kg_max_entity_nodes,
             ).data()
-            if visible is not None:
-                docs = [d for d in docs if d["id"] in visible]
-            doc_ids = {d["id"] for d in docs}
-            nodes = [
+            ent_ids = {e["name"] for e in ents}
+            bridge = sum(1 for e in ents if len(e["all_ids"] or []) > (e["sdeg"] or 0))
+            nodes += [
                 {
-                    "id": d["id"],
-                    "name": d["name"],
-                    "category": 0,
-                    "owner": d.get("owner"),
-                    "scope": d.get("scope", "public"),
-                    "chunks": d.get("chunks", 0),
-                    "symbolSize": min(26 + len(d.get("entities") or []) * 4, 52),
+                    "id": f"e:{e['name']}",
+                    "name": e["name"],
+                    "category": 1,
+                    "deg": e["sdeg"],
+                    "external_deg": max(0, len(e["all_ids"] or []) - (e["sdeg"] or 0)),
+                    "bridge": len(e["all_ids"] or []) > (e["sdeg"] or 0),
+                    "symbolSize": min(10 + (e["sdeg"] or 1) * 3, 30),
                 }
-                for d in docs
+                for e in ents
             ]
-            links = []
-            if include_entities and doc_ids:
-                ents = session.run(
-                    """
-                    MATCH (e:Entity)<-[:MENTIONS]-(d:Document)
-                    WHERE d.doc_id IN $ids
-                    WITH e, count(d) AS deg
-                    ORDER BY deg DESC, e.name LIMIT $limit
-                    RETURN e.name AS name, deg
-                    """,
-                    ids=list(doc_ids), limit=settings.kg_max_entity_nodes,
-                ).data()
-                ent_ids = {e["name"] for e in ents}
-                nodes += [
-                    {"id": f"e:{e['name']}", "name": e["name"], "category": 1,
-                     "symbolSize": min(10 + e["deg"] * 3, 30)}
-                    for e in ents
-                ]
-                for rel in session.run(
-                    "MATCH (d:Document)-[r:MENTIONS]->(e:Entity) "
-                    "WHERE d.doc_id IN $ids "
-                    "RETURN d.doc_id AS s, e.name AS t, r.weight AS w",
-                    ids=list(doc_ids),
-                ).data():
-                    if rel["t"] in ent_ids:
-                        links.append({"source": rel["s"], "target": f"e:{rel['t']}",
-                                      "kind": "mentions", "value": rel.get("w", 1)})
+            result["scope"]["bridge_entities"] = bridge
             for rel in session.run(
-                "MATCH (a:Document)-[r:RELATED]->(b:Document) "
-                "RETURN a.doc_id AS s, b.doc_id AS t, r.shared AS shared"
+                "MATCH (d:Document)-[r:MENTIONS]->(e:Entity) "
+                "WHERE d.doc_id IN $ids "
+                "RETURN d.doc_id AS s, e.name AS t, r.weight AS w",
+                ids=list(shown_ids),
             ).data():
-                if rel["s"] in doc_ids and rel["t"] in doc_ids:
-                    links.append({"source": rel["s"], "target": rel["t"],
-                                  "kind": "related", "value": rel.get("shared", 1)})
+                if rel["t"] in ent_ids:
+                    links.append({"source": rel["s"], "target": f"e:{rel['t']}",
+                                  "kind": "mentions", "value": rel.get("w", 1)})
+            result["scope"]["entities"] = len(ent_ids)
+
+        for rel in rels:
+            if rel["s"] in shown_ids and rel["t"] in shown_ids:
+                cross = rel["s"] in ext_ids or rel["t"] in ext_ids
+                if cross:
+                    result["scope"]["cross_links"] += 1
+                elif rel["s"] in scope_ids and rel["t"] in scope_ids:
+                    result["scope"]["related"] += 1
+                links.append({
+                    "source": rel["s"], "target": rel["t"],
+                    "kind": "related", "value": rel.get("shared", 1), "cross": cross,
+                })
+
         result["nodes"], result["links"] = nodes, links
+        result["scope"].update({
+            "documents": len(scope_ids),
+            "external_documents": len(ext_ids),
+            "pending": max(0, len(reg_scope) - len(scope_ids)),
+        })
         return result
     except Exception as e:
         result["available"] = False
         result["status"] = {"state": "error", "message": str(e)[:300]}
         return result
+    finally:
+        if session is not None:
+            session.close()
 
 
 # ---------------- 实体搜索与节点详情 ----------------
