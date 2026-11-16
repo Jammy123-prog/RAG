@@ -18,8 +18,17 @@ const EXTERNAL_COLOR = '#94a3b8' // 关联文件夹里的文档
 
 const UNFILED = '__unfiled__'
 
-// 文件名/实体名过长会把画布糊成一片，统一截断
-const short = (s, n) => (s && s.length > n ? `${s.slice(0, n - 1)}…` : s || '')
+// 文件名/实体名过长会把画布糊成一片：折成多行 + 只在真的放不下时才截断
+const wrap = (s, perLine, lines = 2) => {
+  const text = (s || '').trim()
+  const max = perLine * lines
+  const cut = text.length > max ? `${text.slice(0, max - 1)}…` : text
+  const out = []
+  for (let i = 0; i < cut.length && out.length < lines; i += perLine) {
+    out.push(cut.slice(i, i + perLine))
+  }
+  return out.join('\n')
+}
 
 function toOption(data, mode) {
   const docsOnly = mode === 'docs'
@@ -74,17 +83,28 @@ function toOption(data, mode) {
           distance: 7,
           color: 'rgba(255,255,255,0.62)',
           fontSize: docsOnly ? 11.5 : 10.5,
+          lineHeight: docsOnly ? 15 : 14,
+          align: 'center',
+          // 文档名最多两行（约 36 字），实体名最多两行（约 20 字）
           formatter: (p) => {
-            if (p.data.category === 0 || p.data.category === 2) return short(p.data.name, docsOnly ? 18 : 13)
-            return docsOnly ? '' : short(p.data.name, 12)
+            if (p.data.category === 0 || p.data.category === 2) return wrap(p.data.name, docsOnly ? 18 : 14)
+            return docsOnly ? '' : wrap(p.data.name, 10)
           },
         },
-        // 密集图里自动隐藏相互遮挡的标签，比硬挤在一起可读得多
-        labelLayout: { hideOverlap: true },
+        // 密集图里先上下错开标签，仍遮挡再隐藏，避免硬挤在一起
+        labelLayout: { hideOverlap: true, moveOverlap: 'shiftY' },
         emphasis: {
           focus: 'adjacency',
           lineStyle: { width: 3 },
-          label: { show: true, fontSize: 13, fontWeight: 'bold', position: 'bottom' },
+          // 悬停/选中时展示完整名称，不再截断
+          label: {
+            show: true,
+            fontSize: 12.5,
+            fontWeight: 'bold',
+            position: 'bottom',
+            color: 'rgba(255,255,255,0.92)',
+            formatter: (p) => p.data.name,
+          },
         },
         scaleLimit: { min: 0.4, max: 4 },
         lineStyle: { opacity: 0.55, curveness: 0.12 },
