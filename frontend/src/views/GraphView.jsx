@@ -18,6 +18,9 @@ const EXTERNAL_COLOR = '#94a3b8' // 关联文件夹里的文档
 
 const UNFILED = '__unfiled__'
 
+// 文件名/实体名过长会把画布糊成一片，统一截断
+const short = (s, n) => (s && s.length > n ? `${s.slice(0, n - 1)}…` : s || '')
+
 function toOption(data, mode) {
   const docsOnly = mode === 'docs'
   // 「文档关联」模式保留范围文档与关联文件夹文档，只隐藏实体
@@ -60,21 +63,28 @@ function toOption(data, mode) {
         draggable: true,
         categories: CATEGORIES,
         force: {
-          repulsion: docsOnly ? 420 : 260,
-          edgeLength: docsOnly ? [110, 240] : [70, 170],
-          gravity: 0.08,
+          repulsion: docsOnly ? 900 : 360,
+          edgeLength: docsOnly ? [150, 300] : [80, 190],
+          gravity: docsOnly ? 0.05 : 0.08,
           layoutAnimation: true,
         },
         label: {
           show: true,
-          color: 'rgba(255,255,255,0.75)',
-          fontSize: docsOnly ? 13 : 11,
-          formatter: (p) => (p.data.category === 0 || p.data.category === 2 || !docsOnly ? p.data.name : ''),
+          position: 'bottom',
+          distance: 7,
+          color: 'rgba(255,255,255,0.62)',
+          fontSize: docsOnly ? 11.5 : 10.5,
+          formatter: (p) => {
+            if (p.data.category === 0 || p.data.category === 2) return short(p.data.name, docsOnly ? 18 : 13)
+            return docsOnly ? '' : short(p.data.name, 12)
+          },
         },
+        // 密集图里自动隐藏相互遮挡的标签，比硬挤在一起可读得多
+        labelLayout: { hideOverlap: true },
         emphasis: {
           focus: 'adjacency',
           lineStyle: { width: 3 },
-          label: { show: true, fontSize: 14, fontWeight: 'bold' },
+          label: { show: true, fontSize: 13, fontWeight: 'bold', position: 'bottom' },
         },
         scaleLimit: { min: 0.4, max: 4 },
         lineStyle: { opacity: 0.55, curveness: 0.12 },
@@ -143,6 +153,27 @@ function useFolderOptions(folders) {
   }, [folders])
 }
 
+function PickerRow({ active, onClick, depth = 0, name, count, hint }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`group flex w-full items-center gap-2 rounded-xl py-2 pr-3 text-left transition-colors duration-200 ${
+        active ? 'bg-aura/[0.12]' : 'hover:bg-white/[0.05]'
+      }`}
+      style={{ paddingLeft: `${10 + depth * 14}px` }}
+    >
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${active ? 'bg-aura' : 'bg-white/15 group-hover:bg-white/35'}`} />
+      <span className={`min-w-0 flex-1 truncate text-[13px] ${active ? 'text-aura' : 'text-white/75'}`}>{name}</span>
+      {hint && <span className="shrink-0 text-[11px] text-white/25">{hint}</span>}
+      {count != null && (
+        <span className={`shrink-0 tabular-nums text-[11px] ${active ? 'text-aura/70' : 'text-white/25'}`}>
+          {count}
+        </span>
+      )}
+    </button>
+  )
+}
+
 function FolderPicker({ options, value, onChange }) {
   const [open, setOpen] = useState(false)
   const boxRef = useRef(null)
@@ -152,8 +183,13 @@ function FolderPicker({ options, value, onChange }) {
     const onDoc = (e) => {
       if (boxRef.current && !boxRef.current.contains(e.target)) setOpen(false)
     }
+    const onKey = (e) => e.key === 'Escape' && setOpen(false)
     document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDoc)
+      document.removeEventListener('keydown', onKey)
+    }
   }, [open])
 
   const current = value === UNFILED
@@ -166,10 +202,10 @@ function FolderPicker({ options, value, onChange }) {
   }
 
   return (
-    <div ref={boxRef} className="relative">
+    <div ref={boxRef} className="relative z-40">
       <button
         onClick={() => setOpen((v) => !v)}
-        className={`flex max-w-[16rem] items-center gap-2 rounded-full px-4 py-2 text-[13px] font-medium ring-1 ring-inset transition-all duration-500 ease-fluid active:scale-[0.97] ${
+        className={`flex max-w-[15rem] items-center gap-2 rounded-full px-4 py-2 text-[13px] font-medium ring-1 ring-inset transition-all duration-500 ease-fluid active:scale-[0.97] ${
           value
             ? 'bg-aura/10 text-aura ring-aura/30'
             : 'bg-white/[0.05] text-white/60 ring-white/[0.09] hover:text-white/85'
@@ -179,48 +215,43 @@ function FolderPicker({ options, value, onChange }) {
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
           <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z" />
         </svg>
-        <span className="truncate">范围：{current}</span>
+        <span className="truncate">{current}</span>
         <svg width="10" height="10" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" className={`shrink-0 transition-transform duration-300 ${open ? 'rotate-180' : ''}`}>
           <path d="M2 4l4 4 4-4" />
         </svg>
       </button>
 
       {open && (
-        <div className="absolute left-0 top-11 z-30 max-h-80 w-72 animate-reveal overflow-y-auto rounded-2xl bg-[#0b0b0d]/95 p-1.5 ring-1 ring-white/[0.1] backdrop-blur-2xl">
-          <button
-            onClick={() => pick('')}
-            className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left transition-colors duration-300 hover:bg-white/[0.06] ${
-              value === '' ? 'bg-white/[0.06]' : ''
-            }`}
-          >
-            <span className="min-w-0 flex-1 truncate text-[13px] text-white/85">全部文档（含所有文件夹）</span>
-          </button>
-          <button
-            onClick={() => pick(UNFILED)}
-            className={`flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left transition-colors duration-300 hover:bg-white/[0.06] ${
-              value === UNFILED ? 'bg-white/[0.06]' : ''
-            }`}
-          >
-            <span className="min-w-0 flex-1 truncate text-[13px] text-white/85">未分组文档</span>
-          </button>
-          {options.length > 0 && <div className="my-1 h-px bg-white/[0.07]" />}
-          {options.map((o) => (
-            <button
-              key={o.id}
-              onClick={() => pick(o.id)}
-              className={`flex w-full items-center gap-2 rounded-xl py-2 pr-3 text-left transition-colors duration-300 hover:bg-white/[0.06] ${
-                value === o.id ? 'bg-aura/10' : ''
-              }`}
-              style={{ paddingLeft: `${12 + o.depth * 14}px` }}
-            >
-              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${value === o.id ? 'bg-aura' : 'bg-white/20'}`} />
-              <span className="min-w-0 flex-1 truncate text-[13px] text-white/80">{o.name}</span>
-              <span className="shrink-0 text-[11px] text-white/30">{o.count} 份</span>
-            </button>
-          ))}
-          {options.length === 0 && (
-            <p className="px-3 py-2 text-[12px] text-white/30">还没有文件夹，可先在知识库新建</p>
-          )}
+        <div className="absolute left-0 top-11 z-50 w-80 animate-reveal overflow-hidden rounded-2xl bg-[#0b0b0d] shadow-[0_28px_70px_-24px_rgba(0,0,0,0.95)] ring-1 ring-white/[0.1]">
+          <div className="flex items-baseline justify-between px-4 pb-1.5 pt-3">
+            <p className="text-[10px] font-medium uppercase tracking-[0.2em] text-white/30">图谱范围</p>
+            <p className="text-[10.5px] text-white/25">同文件夹关联更密</p>
+          </div>
+          <div className="max-h-72 overflow-y-auto px-1.5 pb-1.5">
+            <PickerRow active={value === ''} onClick={() => pick('')} name="全部文档" hint="含所有文件夹" />
+            <PickerRow active={value === UNFILED} onClick={() => pick(UNFILED)} name="未分组文档" />
+            {options.length > 0 && (
+              <>
+                <div className="my-1 h-px bg-white/[0.07]" />
+                <p className="px-2.5 pb-1 pt-1 text-[10px] font-medium uppercase tracking-[0.2em] text-white/25">
+                  知识库文件夹
+                </p>
+                {options.map((o) => (
+                  <PickerRow
+                    key={o.id}
+                    active={value === o.id}
+                    onClick={() => pick(o.id)}
+                    depth={o.depth}
+                    name={o.name}
+                    count={o.count}
+                  />
+                ))}
+              </>
+            )}
+            {options.length === 0 && (
+              <p className="px-3 py-2.5 text-[12px] text-white/30">还没有文件夹，可先在知识库新建</p>
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -546,6 +577,8 @@ export default function GraphView({ onAsk, user }) {
     })
     if (data?.nodes?.length) {
       chartInst.current.setOption(toOption(data, mode), true)
+      // 首帧容器高度可能还没稳定，重算一次尺寸，避免力导向布局把节点挤到画布一角
+      requestAnimationFrame(() => chartInst.current?.resize())
     }
   }, [data, mode])
 
@@ -612,8 +645,8 @@ export default function GraphView({ onAsk, user }) {
         跨文件夹共享的实体会被标为桥接，点击节点可查看关联文档与原文片段，实体还能一键提问。
       </p>
 
-      {/* 工具栏：范围选择 + 模式切换 + 实体搜索 */}
-      <div className="mt-8 flex animate-reveal flex-wrap items-center gap-3 [animation-delay:250ms]">
+      {/* 工具栏：范围选择 + 模式切换 + 实体搜索（relative z-30：让下拉盖住下方画布） */}
+      <div className="relative z-30 mt-8 flex animate-reveal flex-wrap items-center gap-3 [animation-delay:250ms]">
         <FolderPicker options={folderOptions} value={folderId} onChange={setFolderId} />
         <div className="flex rounded-full bg-white/[0.04] p-1 ring-1 ring-inset ring-white/[0.08]">
           {[
@@ -732,7 +765,7 @@ export default function GraphView({ onAsk, user }) {
       )}
 
       {/* 图谱画布（Double-Bezel）+ 详情侧栏 */}
-      <div className="mt-6 animate-reveal rounded-[2rem] bg-white/[0.04] p-2 ring-1 ring-white/[0.07] [animation-delay:300ms]">
+      <div className="relative z-0 mt-6 animate-reveal rounded-[2rem] bg-white/[0.04] p-2 ring-1 ring-white/[0.07] [animation-delay:300ms]">
         <div className="relative h-[68dvh] min-h-[26rem] overflow-hidden rounded-[calc(2rem-0.5rem)] bg-[#0b0b0d] shadow-[inset_0_1px_1px_rgba(255,255,255,0.05)]">
           {data && !data.available ? (
             <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
